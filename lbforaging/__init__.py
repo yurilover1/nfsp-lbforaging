@@ -2,6 +2,10 @@ from itertools import product
 
 from gymnasium import register
 
+import sys
+import lbforaging.foraging as foraging
+sys.modules['foraging'] = foraging
+
 
 sizes = range(5, 20)
 players = range(2, 10)

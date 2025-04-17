@@ -1,0 +1,11 @@
+numpy==2.0.1
+matplotlib==3.10.1
+gymnasium==0.28.1
+pyglet==1.5.27
+torch==2.5.0
+torchvision==0.20.0
+torchaudio==2.5.0
+pillow==11.1.0
+cloudpickle==1.2.2
+# 本地安装lbforaging (运行前请在lbforaging目录执行 pip install -e .)
+# lbforaging==2.0.0

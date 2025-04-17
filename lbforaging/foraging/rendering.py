@@ -5,7 +5,7 @@
 import math
 import os
 import sys
-
+from pyglet import gl
 import numpy as np
 import six
 from gymnasium import error
@@ -234,15 +234,67 @@ class Viewer(object):
         circle.draw(GL_POLYGON)
         glColor3ub(*_BLACK)
         circle.draw(GL_LINE_LOOP)
-        label = pyglet.text.Label(
-            str(level),
-            font_name="Times New Roman",
-            font_size=12,
-            bold=True,
-            x=badge_x,
-            y=badge_y + 2,
-            anchor_x="center",
-            anchor_y="center",
-            color=(*_BLACK, 255),
-        )
-        label.draw()
+        
+        # 完全移除文本渲染，使用简单的数字符号绘制
+        # 使用直线绘制数字符号，绕过文本渲染
+        glColor3ub(*_BLACK)
+        
+        # 绘制表示数字的基本图形，这里仅处理1-9的数字
+        digit = int(level)
+        if 1 <= digit <= 9:
+            # 线段宽度
+            glLineWidth(2.0)
+            
+            # 设置相对大小和位置
+            size = radius * 0.8
+            x_center = badge_x
+            y_center = badge_y
+            
+            if digit == 1:  # 绘制数字1
+                # 垂直线条
+                pyglet.graphics.draw(
+                    2, GL_LINES,
+                    ('v2f', (x_center, y_center - size/2, x_center, y_center + size/2))
+                )
+            elif digit == 2:  # 绘制数字2
+                # 绘制2的简单表示（上横线，右竖线，中横线，左竖线，底横线）
+                points = [
+                    x_center - size/2, y_center + size/2,  # 左上
+                    x_center + size/2, y_center + size/2,  # 右上
+                    x_center + size/2, y_center,           # 右中
+                    x_center - size/2, y_center,           # 左中
+                    x_center - size/2, y_center - size/2,  # 左下
+                    x_center + size/2, y_center - size/2   # 右下
+                ]
+                pyglet.graphics.draw(6, GL_LINE_STRIP, ('v2f', points))
+            elif digit == 3:  # 绘制数字3
+                # 右侧竖线和三条横线
+                h_points = [
+                    x_center - size/2, y_center + size/2, x_center + size/2, y_center + size/2,  # 上横
+                    x_center - size/2, y_center, x_center + size/2, y_center,                     # 中横
+                    x_center - size/2, y_center - size/2, x_center + size/2, y_center - size/2    # 下横
+                ]
+                pyglet.graphics.draw(6, GL_LINES, ('v2f', h_points))
+            elif digit == 4:  # 绘制数字4
+                # 左竖线，中横线，右竖线
+                points = [
+                    x_center - size/2, y_center + size/2,  # 左上
+                    x_center - size/2, y_center,           # 左中
+                    x_center + size/2, y_center + size/2,  # 右上
+                    x_center + size/2, y_center - size/2   # 右下
+                ]
+                pyglet.graphics.draw(2, GL_LINES, ('v2f', points[0:4]))
+                pyglet.graphics.draw(2, GL_LINES, ('v2f', points[2:6]))
+                # 中横线
+                pyglet.graphics.draw(2, GL_LINES, 
+                    ('v2f', (x_center - size/2, y_center, x_center + size/2, y_center))
+                )
+            else:  # 对于5-9，简单绘制一个点表示有数字
+                pyglet.graphics.draw(
+                    1, GL_POINTS,
+                    ('v2f', (x_center, y_center)),
+                    ('c3B', _BLACK)
+                )
+            
+            # 恢复线宽
+            glLineWidth(1.0)

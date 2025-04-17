@@ -1,0 +1,7 @@
+numpy
+gymnasium
+pyglet<2
+six
+
+[test]
+pytest

@@ -2,6 +2,7 @@ from collections import namedtuple, defaultdict
 from enum import Enum
 from itertools import product
 import logging
+import time
 from typing import Iterable
 
 import gymnasium as gym
@@ -48,7 +49,10 @@ class Player:
         self.controller = controller
 
     def step(self, obs):
-        return self.controller._step(obs)
+        if hasattr(self.controller, '_step'):
+            return self.controller._step(obs)
+        else:
+            return self.controller.step(obs)
 
     @property
     def name(self):
@@ -726,6 +730,80 @@ class ForagingEnv(gym.Env):
     def close(self):
         if self.viewer:
             self.viewer.close()
+
+    def run(self, agents=None, is_training=False, render=False, sleep_time=0.5):
+        """
+        运行完整的回合，由agents控制行动选择
+        
+        参数:
+            agents: 控制玩家的智能体列表，若为None则使用self.players中设置的控制器
+            is_training: 是否处于训练模式
+            render: 是否渲染游戏界面
+            sleep_time: 渲染时每步之间的间隔时间(秒)
+            
+        返回:
+            trajectories: 每个玩家的轨迹列表
+            payoffs: 每个玩家的总奖励
+        """
+        if agents is not None:
+            # 临时设置控制器
+            for i, agent in enumerate(agents):
+                if i < len(self.players):
+                    self.players[i].set_controller(agent)
+                    
+        # 重置环境
+        obss, _ = self.reset()
+        done = False
+        trajectories = [[] for _ in range(len(self.players))]
+        payoffs = np.zeros(len(self.players))
+        
+        # 渲染初始状态
+        if render:
+            self.render()
+            time.sleep(sleep_time)
+        
+        # 逐步执行，直到回合结束
+        while not done:
+            # 收集动作
+            actions = []
+            for i, player in enumerate(self.players):
+                # 构建observation字典
+                obs_dict = {
+                    'obs': obss[i],
+                    'actions': list(range(6))
+                }
+                # 若玩家有控制器，则由控制器选择动作
+                if player.controller:
+                    action = player.step(obs_dict)
+                else:
+                    # 否则随机选择一个动作
+                    action = np.random.choice(list(range(6)))
+                actions.append(action)
+            
+            # 执行动作
+            next_obss, rewards, done, _, _ = self.step(actions)
+            payoffs += rewards
+            
+            # 记录轨迹
+            for i in range(len(self.players)):
+                # 轨迹段格式：[obs_dict, action, reward, next_obs_dict, done]
+                trajectory_segment = [
+                    {'obs': obss[i], 'actions': list(range(6))},
+                    actions[i],
+                    rewards[i],
+                    {'obs': next_obss[i], 'actions': list(range(6))},
+                    done
+                ]
+                trajectories[i].append(trajectory_segment)
+            
+            # 更新观察
+            obss = next_obss
+            
+            if render:
+                self.render()
+                time.sleep(sleep_time)
+        
+        return trajectories, payoffs
 
     def test_make_gym_obs(self):
         """Test wrapper to test the current observation in a public manner."""

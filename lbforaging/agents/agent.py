@@ -19,15 +19,25 @@ class BaseAgent:
         return getattr(self.player, item)
 
     def _step(self, obs):
-        self.observed_position = next(
-            (x for x in obs.players if x.is_self), None
-        ).position
+        # 兼容字典格式的观察
+        if isinstance(obs, dict):
+            # 保存动作到历史
+            action = self.step(obs)
+            if hasattr(self, 'history'):
+                self.history.append(action)
+            return action
+        else:
+            # 原始的处理方式
+            self.observed_position = next(
+                (x for x in obs.players if x.is_self), None
+            ).position
 
-        # saves the action to the history
-        action = self.step(obs)
-        self.history.append(action)
+            # 保存动作到历史
+            action = self.step(obs)
+            if hasattr(self, 'history'):
+                self.history.append(action)
 
-        return action
+            return action
 
     def step(self, obs):
         raise NotImplementedError("You must implement an agent")
