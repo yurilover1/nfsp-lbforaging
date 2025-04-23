@@ -41,19 +41,22 @@ def main(args):
             player=env.players[i],
             state_size=state_size,
             action_size=action_size,
-            epsilon_init=0.6,                # 提高初始探索率
-            epsilon_decay=10000,             # 减缓探索衰减速度
-            epsilon_min=0.1,                 # 提高最小探索率
-            update_freq=200,                 # 减少目标网络更新频率
-            sl_lr=0.005,                     # 提高监督学习率
-            rl_lr=0.005,                     # 提高强化学习率
-            sl_buffer_size=10000,            # 减小监督学习缓冲区
-            rl_buffer_size=10000,            # 减小强化学习缓冲区
-            rl_start=100,                    # 减小RL缓冲区起始大小
-            sl_start=100,                    # 减小SL缓冲区起始大小
-            train_freq=1,                    # 每步都进行训练
+            epsilon_init=0.2,                # 提高初始探索率
+            epsilon_decay=20000,             # 减缓探索衰减速度
+            epsilon_min=0.05,               # 提高最小探索率
+            update_freq=50,                # 减少目标网络更新频率
+            sl_lr=0.01,                     # 提高监督学习率
+            rl_lr=0.02,                     # 提高强化学习率
+            sl_buffer_size=5000,            # 增大监督学习缓冲区
+            rl_buffer_size=10000,            # 增大强化学习缓冲区
+            rl_start=1000,                    # 减小RL缓冲区起始大小
+            sl_start=2000,                    # 减小SL缓冲区起始大小
+            train_freq=4,                    # 每步都进行训练
             gamma=0.99,                      # 折扣因子
-            eta=0.2,                         # 增加最优策略使用概率
+            eta=0.2,                         # 增加平均策略使用概率
+            rl_batch_size=128,
+            sl_batch_size=256,
+            device=args.device
         )
         nfsp_agents.append(agent)
     
@@ -72,6 +75,7 @@ def main(args):
     # 测试模式
     else:
         # 使用utils中的test_agents函数进行测试
+        
         test_results = test_agents(
             env,
             nfsp_agents,
@@ -100,8 +104,9 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="测试模式：加载预训练模型")
     parser.add_argument("--seed", type=int, default=None, help="随机种子")
     parser.add_argument("--verbose", action="store_true", help="启用详细日志")
-    parser.add_argument("--evaluate_exploitability", action="store_true", help="评估团队可利用度")
+    parser.add_argument("--eval_explo", action="store_true", help="评估团队可利用度")
     parser.add_argument("--eval_episodes", type=int, default=100, help="评估回合数")
+    parser.add_argument("--device", type=str, default="cuda:0", help="设备类型")
     
     args = parser.parse_args()
     main(args)

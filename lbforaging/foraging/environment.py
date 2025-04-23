@@ -1,4 +1,4 @@
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, deque
 from enum import Enum
 from itertools import product
 import logging
@@ -98,6 +98,8 @@ class ForagingEnv(gym.Env):
         observe_agent_levels=True,
         penalty=0.0,
         render_mode=None,
+        step_reward_factor=0.5,  # 步数奖励因子
+        step_reward_threshold=0.1,  # 步数奖励阈值，表示最大步数的比例
     ):
         self.logger = logging.getLogger(__name__)
         self.render_mode = render_mode
@@ -106,6 +108,10 @@ class ForagingEnv(gym.Env):
         self.field = np.zeros(field_size, np.int32)
 
         self.penalty = penalty
+        
+        # 步数奖励相关参数
+        self.step_reward_factor = step_reward_factor
+        self.step_reward_threshold = step_reward_threshold
 
         if isinstance(min_food_level, Iterable):
             assert (
@@ -756,6 +762,9 @@ class ForagingEnv(gym.Env):
         done = False
         trajectories = [[] for _ in range(len(self.players))]
         payoffs = np.zeros(len(self.players))
+
+        # 初始化轨迹历史队列和动作缓冲区
+        actions_buffs = [deque(maxlen=50) for _ in range(len(self.players))]  # 每个智能体的动作历史
         
         # 渲染初始状态
         if render:
@@ -767,35 +776,54 @@ class ForagingEnv(gym.Env):
             # 收集动作
             actions = []
             for i, player in enumerate(self.players):
+                # 提取有效动作
+                valid_actions = [action.value for action in self._valid_actions[player]]
+                
                 # 构建observation字典
                 obs_dict = {
                     'obs': obss[i],
-                    'actions': list(range(6))
+                    'actions': valid_actions  # 使用实际有效的动作，不是所有动作
                 }
-                # 若玩家有控制器，则由控制器选择动作
+                
+                # 让智能体选择动作
                 if player.controller:
                     action = player.step(obs_dict)
                 else:
-                    # 否则随机选择一个动作
-                    action = np.random.choice(list(range(6)))
+                    # 如果没有控制器，随机选择动作
+                    action = np.random.choice(valid_actions)
+                # 检测重复动作模式
+                if self._repeated_actions_detected(action, actions_buffs[i]):
+                    # 如果检测到重复，选择一个不同的随机动作
+                    other_valid_actions = [a for a in valid_actions if a != action]
+                    if other_valid_actions:  # 确保有其他有效动作可选
+                        action = np.random.choice(other_valid_actions)
+                # if len(actions_buffs[i]) >= 3 and actions_buffs[i][-1] == 5 and self.adjacent_food(*player.position):
+                #     action = 5
+                # 记录动作到缓冲区
+                actions_buffs[i].append(action)
                 actions.append(action)
             
-            # 执行动作
+            # 使用环境的step函数执行动作
             next_obss, rewards, done, _, _ = self.step(actions)
+            
+            # 更新累计奖励
             payoffs += rewards
             
-            # 记录轨迹
+            # 记录每个智能体的轨迹
             for i in range(len(self.players)):
-                # 轨迹段格式：[obs_dict, action, reward, next_obs_dict, done]
+                next_valid_actions = [action.value for action in self._valid_actions[self.players[i]]]
+                
+                # 轨迹格式：[obs_dict, action, reward, next_obs_dict, done]
                 trajectory_segment = [
-                    {'obs': obss[i], 'actions': list(range(6))},
+                    {'obs': obss[i], 'actions': valid_actions},  # 当前观察和有效动作
                     actions[i],
                     rewards[i],
-                    {'obs': next_obss[i], 'actions': list(range(6))},
+                    {'obs': next_obss[i], 'actions': next_valid_actions},  # 下一观察和有效动作
                     done
                 ]
                 trajectories[i].append(trajectory_segment)
-            
+
+
             # 更新观察
             obss = next_obss
             
@@ -816,3 +844,84 @@ class ForagingEnv(gym.Env):
         except Exception as _:
             return False
         return True
+    def _repeated_actions_detected(self, action, actions_buff):
+        """
+        检测动作是否出现重复，防止智能体陷入动作循环
+        
+        参数:
+            action: 当前选择的动作
+            actions_buff: 最近收集的动作序列
+            
+        返回:
+            bool: 如果检测到重复动作模式返回True，否则返回False
+        """
+        # 如果动作缓冲区为空，不可能有重复
+        if not actions_buff:
+            return False
+        
+        # 环境状态分析：计算当前环境中食物数量和智能体数量    
+        food_count = np.count_nonzero(self.field)
+        agent_count = len(self.players)
+        
+        # 调整策略：根据环境中的食物和智能体数量动态调整
+        
+        # 单目标情况下使用较严格的检测
+        if food_count <= 1:
+            # 检测循环模式：如果缓冲区足够长，检查是否有2步或3步的循环
+            if len(actions_buff) >= 3 and action != 5:
+                # 超过3次连续相同动作视为重复
+                if action == actions_buff[-1] == actions_buff[-2] == actions_buff[-3]:
+                    return True
+                    
+                if len(actions_buff) >= 4:
+                    # 检测2步循环 (A-B-A-B模式)
+                    if action == actions_buff[-2] and actions_buff[-1] == actions_buff[-3]:
+                        return True
+                    
+                    # 检测3步循环 (A-B-C-A-B-C模式)
+                    if len(actions_buff) >= 6:
+                        if (action == actions_buff[-3] and 
+                            actions_buff[-1] == actions_buff[-4] and 
+                            actions_buff[-2] == actions_buff[-5]):
+                            return True
+        # 多目标多智能体情况下，仅检测长时间重复的加载动作
+        else:
+            # 检查是否为加载动作(Action.LOAD.value = 5)
+            if action == 5:
+                # 只有当连续加载次数超过阈值时才判定为重复
+                load_threshold = min(5, food_count + 1)  # 根据食物数量调整阈值
+                
+                # 统计连续加载次数
+                consecutive_loads = 0
+                for a in reversed(actions_buff):
+                    if a == 5:
+                        consecutive_loads += 1
+                    else:
+                        break
+                        
+                # 连续加载次数超过阈值返回True
+                if consecutive_loads >= load_threshold:
+                    # 检查是否有其他智能体在当前智能体附近
+                    # 由于无法直接获取当前智能体的位置，我们通过其他方式检测周围的智能体
+                    
+                    # 寻找执行LOAD动作的食物位置
+                    loaded_food_locations = []
+                    for row in range(self.rows):
+                        for col in range(self.cols):
+                            if self.field[row, col] > 0 and self.adjacent_players(row, col):
+                                loaded_food_locations.append((row, col))
+                    
+                    # 如果有正在被多个智能体尝试加载的食物，允许继续等待
+                    for loc in loaded_food_locations:
+                        if len(self.adjacent_players(*loc)) > 1:
+                            return False
+                    
+                    return True
+            # 对于非加载动作，只检测极长的重复序列
+            elif len(actions_buff) >= 8:
+                # 检测8次完全相同的动作
+                if all(a == action for a in list(actions_buff)[-7:]):
+                    return True
+                    
+        return False
+        

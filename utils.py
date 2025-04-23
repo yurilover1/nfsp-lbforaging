@@ -84,11 +84,26 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
         'episode_rewards': [],
         'eval_rewards': [],
         'eval_episodes': [],  # 记录每次评估对应的回合数
-        'exploitability': []  # 新增可利用度记录
+        'exploitability': [],  # 可利用度记录
+        'sl_losses': [],       # 监督学习损失
+        'rl_losses': [],       # 强化学习损失
+        'policy_accuracies': [] # 策略准确率
     }
     
     # 创建结果目录
     os.makedirs("./results", exist_ok=True)
+    
+    # 用于记录100回合的奖励
+    recent_rewards = []
+    
+    # 设置初始批次
+    current_batch = 0
+    total_batches = num_episodes // 100
+    
+    # 记录最后显示的状态文本长度
+    last_status_length = 0
+    
+    print(f"\n开始训练 - 总共 {num_episodes} 回合 ({total_batches} 批次)...\n")
     
     for episode in range(num_episodes):
         # 在每个回合开始时选择策略模式
@@ -99,7 +114,10 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
         should_render = render and episode % render_interval == 0
         
         if should_render:
-            print(f"渲染回合 {episode}...")
+            # 清除当前行
+            if last_status_length > 0:
+                print(" " * last_status_length, end="\r", flush=True)
+            print(f"\n渲染回合 {episode}...")
             # 为渲染创建专门的环境实例
             render_env = gym.make("Foraging-5x5-2p-1f-v3", render_mode="human")
             
@@ -127,8 +145,52 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
             )
         
         # 记录每个回合的奖励
-        print(f"回合 {episode} 奖励: {payoffs}")
         history['episode_rewards'].append(payoffs)
+        
+        # 计算团队总奖励（智能体奖励之和）
+        team_reward = sum(payoffs)
+        recent_rewards.append(team_reward)
+        
+        # 计算当前100轮内的进度（0-99）
+        current_progress = episode % 100
+        progress_percent = current_progress + 1  # 进度从1%到100%
+        
+        # 创建动态进度条
+        bar_length = 20  # 减少进度条长度，避免行太长
+        block = int(bar_length * progress_percent / 100)
+        progress_bar = '█' * block + '░' * (bar_length - block)
+        
+        # 计算总体完成进度
+        overall_progress = (episode + 1) / num_episodes * 100
+        
+        # 使用\r在同一行更新进度，固定状态文本的宽度以确保完全覆盖前一行
+        status_text = f"批次: {current_batch+1}/{total_batches} | 进度: [{progress_bar}] {progress_percent:3d}%| 奖励: {team_reward:.2f}"
+        
+        # 先清除前一行，再打印新状态
+        clear_line = " " * max(last_status_length, len(status_text))
+        print(clear_line, end="\r", flush=True)
+        print(status_text, end="\r", flush=True)
+        
+        # 更新状态行长度
+        last_status_length = len(status_text)
+        
+        # 每100轮显示平均奖励并重置进度条
+        if (episode + 1) % 100 == 0:
+            # 计算最近100回合的平均奖励
+            avg_reward = np.mean(recent_rewards)
+            
+            # 清除当前行并打印批次完成信息
+            print(" " * last_status_length, end="\r", flush=True)
+            print(f"\n✓ 完成批次 {current_batch+1}/{total_batches} | 平均团队奖励: {avg_reward:.4f} | 总进度: {overall_progress:.1f}%\n")
+            
+            # 更新批次计数
+            current_batch += 1
+            
+            # 重置recent_rewards列表
+            recent_rewards = []
+            
+            # 重置状态行长度（因为下一行会从头开始）
+            last_status_length = 0
         
         # 存储轨迹并训练
         for i in range(env.n_agents):
@@ -150,9 +212,30 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
                     nfsp_agents[i].add_traj([obs, action, reward, next_obs, done])
                     nfsp_agents[i].train()
         
+        # 每10个回合保存损失和准确率
+        if episode % 10 == 0 and len(nfsp_agents) > 0:
+            # 使用第一个智能体的损失数据
+            agent = nfsp_agents[0]
+            # 保存SL损失
+            if len(agent.losses) > 0:
+                history['sl_losses'].append(agent.losses[-1])
+            # 保存RL损失
+            if len(agent.RLlosses) > 0:
+                history['rl_losses'].append(agent.RLlosses[-1])
+            # 保存策略准确率
+            if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > 0:
+                history['policy_accuracies'].append(agent.policy_accuracies[-1])
+        
         # 定期评估
         if episode % eval_interval == 0 or episode == num_episodes - 1:
             try:
+                # 清除当前行，确保评估信息从新行开始
+                if last_status_length > 0:
+                    print(" " * last_status_length, end="\r", flush=True)
+                
+                # 重置状态行长度
+                last_status_length = 0
+                
                 # 计算普通奖励和可利用度
                 eval_rewards, exploitability = evaluate(
                     env, 
@@ -168,17 +251,21 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
                 history['eval_episodes'].append(episode)  # 记录评估回合
                 history['exploitability'].append(exploitability)  # 记录可利用度
                 
-                # 打印进度
-                print(f"Episode {episode}/{num_episodes}: 训练奖励={payoffs}, 评估奖励={agent0_reward}, 可利用度={exploitability:.4f}")
+                # 打印评估信息
+                print(f"\n评估 - 回合 {episode}/{num_episodes}: 奖励={eval_rewards}, 可利用度={exploitability:.4f}\n")
             except Exception as e:
-                print(f"评估过程中发生错误: {e}")
+                print(f"\n评估过程中发生错误: {e}")
                 import traceback
                 traceback.print_exc()
     
-    # 训练结束，保存模型
+    # 训练结束，清空最后一行
+    if last_status_length > 0:
+        print(" " * last_status_length, end="\r", flush=True)
+    print("\n训练完成！\n")
+    
+    # 保存模型
     for agent in nfsp_agents:
         agent.save_models()
-        agent.plot_losses()
     
     # 绘制训练曲线
     plot_training_curve(history, num_episodes, eval_interval, nfsp_agents)
@@ -189,140 +276,188 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
     return nfsp_agents
 
 def plot_training_curve(history, num_episodes, eval_interval, nfsp_agents=None):
-    """绘制训练曲线"""
+    """绘制训练曲线，包括四幅图：监督学习损失、策略准确率、强化学习损失和队伍总奖励"""
+    # 处理中文显示问题
+    use_english = True
     plt.figure(figsize=(16, 16))
     
-    # 1. 训练奖励 (左上角)
+    # 1. 监督学习损失 (左上角)
     plt.subplot(2, 2, 1)
-    raw_rewards = history['episode_rewards']
     
-    # 打印训练奖励数据用于调试
-    print(f"原始训练奖励数据: {raw_rewards}")
+    if nfsp_agents and len(nfsp_agents) > 0:
+        
+        # 计算所有智能体的平均损失
+        all_losses = []
+        max_length = 0
+        
+        # 确定最大长度并收集数据
+        for agent in nfsp_agents:
+            if len(agent.losses) > max_length:
+                max_length = len(agent.losses)
+        
+        # 初始化累积数组
+        if max_length > 0:
+            avg_losses = np.zeros(max_length)
+            count = np.zeros(max_length)
+            
+            # 累加每个智能体的损失
+            for agent in nfsp_agents:
+                losses = np.array(agent.losses)
+                avg_losses[:len(losses)] += losses
+                count[:len(losses)] += 1
+            
+            # 计算平均值（避免除零错误）
+            valid_indices = count > 0
+            avg_losses[valid_indices] /= count[valid_indices]
+            
+            # 降采样
+            if len(avg_losses) > 1000:
+                step = len(avg_losses) // 1000
+                avg_losses = avg_losses[::step]
+            
+            # 平滑处理
+            window_size = min(20, len(avg_losses))
+            if window_size > 1:
+                smooth_avg = np.convolve(avg_losses, np.ones(window_size)/window_size, mode='valid')
+                plt.plot(smooth_avg, 'k-', linewidth=2, 
+                         label='Average SL Loss' if use_english else '平均SL损失')
+                
+        plt.xlabel('Training Steps' if use_english else '训练步数')
+        plt.ylabel('Loss' if use_english else '损失')
+        plt.title('Supervised Learning Loss' if use_english else '监督学习损失')
+        plt.grid(True)
+        plt.legend()
+    
+    # 2. 策略准确率 (右上角)
+    plt.subplot(2, 2, 2)
+    
+    if nfsp_agents and len(nfsp_agents) > 0:
+        # 如果智能体数量较多，也绘制平均准确率
+        if len(nfsp_agents) > 1:
+            # 计算所有智能体的平均准确率
+            max_length = 0
+            
+            # 确定最大长度
+            for agent in nfsp_agents:
+                if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > max_length:
+                    max_length = len(agent.policy_accuracies)
+            
+            # 初始化累积数组
+            if max_length > 0:
+                avg_acc = np.zeros(max_length)
+                count = np.zeros(max_length)
+                
+                # 累加每个智能体的准确率
+                for agent in nfsp_agents:
+                    if hasattr(agent, 'policy_accuracies'):
+                        acc = np.array(agent.policy_accuracies)
+                        avg_acc[:len(acc)] += acc
+                        count[:len(acc)] += 1
+                
+                # 计算平均值
+                valid_indices = count > 0
+                avg_acc[valid_indices] /= count[valid_indices]
+                
+                # 降采样
+                if len(avg_acc) > 1000:
+                    step = len(avg_acc) // 1000
+                    avg_acc = avg_acc[::step]
+                
+                # 平滑处理
+                window_size = min(20, len(avg_acc))
+                if window_size > 1:
+                    smooth_avg = np.convolve(avg_acc, np.ones(window_size)/window_size, mode='valid')
+                    plt.plot(smooth_avg, 'k-', linewidth=2, 
+                             label='Average Accuracy' if use_english else '平均准确率')
+        
+        plt.xlabel('Training Steps' if use_english else '训练步数')
+        plt.ylabel('Accuracy' if use_english else '准确率')
+        plt.title('Policy Accuracy' if use_english else '策略准确率')
+        plt.grid(True)
+        plt.legend()
+    
+    # 3. 强化学习损失 (左下角)
+    plt.subplot(2, 2, 3)
+    
+    if nfsp_agents and len(nfsp_agents) > 0:
+        
+        # 计算所有智能体的平均RL损失
+        max_length = 0
+        
+        # 确定最大长度
+        for agent in nfsp_agents:
+            if len(agent.RLlosses) > max_length:
+                max_length = len(agent.RLlosses)
+        
+        # 初始化累积数组
+        if max_length > 0:
+            avg_rl = np.zeros(max_length)
+            count = np.zeros(max_length)
+            
+            # 累加每个智能体的RL损失
+            for agent in nfsp_agents:
+                rl = np.array(agent.RLlosses)
+                avg_rl[:len(rl)] += rl
+                count[:len(rl)] += 1
+            
+            # 计算平均值
+            valid_indices = count > 0
+            avg_rl[valid_indices] /= count[valid_indices]
+            
+            # 降采样
+            if len(avg_rl) > 1000:
+                step = len(avg_rl) // 1000
+                avg_rl = avg_rl[::step]
+            
+            # 平滑处理
+            window_size = min(20, len(avg_rl))
+            if window_size > 1:
+                smooth_avg = np.convolve(avg_rl, np.ones(window_size)/window_size, mode='valid')
+                plt.plot(smooth_avg, 'k-', linewidth=2, 
+                         label='Average RL Loss' if use_english else '平均RL损失')
+        
+        plt.xlabel('Training Steps' if use_english else '训练步数')
+        plt.ylabel('Loss' if use_english else '损失')
+        plt.title('Reinforcement Learning Loss' if use_english else '强化学习损失')
+        plt.grid(True)
+        plt.legend()
+    
+    # 4. 队伍总奖励 (右下角)
+    plt.subplot(2, 2, 4)
+    raw_rewards = history['episode_rewards']
     
     if len(raw_rewards) > 0:
         # 检查数据格式并转换为numpy数组
         if isinstance(raw_rewards[0], (list, np.ndarray)):
-            # 多智能体情况，每个元素是包含多个奖励的列表或数组
+            # 多智能体情况，绘制团队总奖励
             rewards = np.array([reward for reward in raw_rewards])
-            n_agents = rewards.shape[1]
+            team_rewards = rewards.sum(axis=1)
+             # 平滑处理团队奖励
+            window_size = min(50, len(team_rewards) // 10)  # 使用更大的窗口来平滑奖励曲线
+            if window_size > 1:
+                smooth_rewards = np.convolve(team_rewards, np.ones(window_size)/window_size, mode='valid')
+                # 画出原始数据（较浅的颜色）
+                plt.plot(np.arange(len(team_rewards)), team_rewards, 'b-', alpha=0.3, 
+                         label='Raw Team Reward' if use_english else '原始队伍奖励')
+                # 画出平滑后的数据（较深的颜色）
+                plt.plot(np.arange(len(smooth_rewards)) + window_size//2, smooth_rewards, 'b-', linewidth=2, 
+                         label='Smoothed Team Reward' if use_english else '平滑队伍奖励')
+            else:
+                # 如果数据量太少，无法平滑，就直接绘制原始数据
+                plt.plot(np.arange(len(team_rewards)), team_rewards, 'b-', 
+                         label='Team Total Reward' if use_english else '队伍总奖励')
             
-            # 直接绘制每个智能体的奖励
-            for i in range(n_agents):
-                plt.plot(np.arange(len(rewards)), rewards[:, i], 'o-', label=f'智能体 {i+1}')
         else:
-            # 单智能体情况，每个元素是单个奖励值
+            # 单智能体情况
             rewards = np.array(raw_rewards)
-            plt.plot(np.arange(len(rewards)), rewards, 'o-', label='智能体')
-    else:
-        print("训练奖励数据为空，无法绘制")
+            plt.plot(np.arange(len(rewards)), rewards, 'b-', 
+                     label='Agent Reward' if use_english else '智能体奖励')
     
-    plt.xlabel('回合')
-    plt.ylabel('奖励')
-    plt.title('训练奖励')
+    plt.xlabel('Episodes' if use_english else '回合')
+    plt.ylabel('Reward' if use_english else '奖励')
+    plt.title('Team Total Reward' if use_english else '队伍总奖励')
     plt.grid(True)
     plt.legend()
-    
-    # 2. 评估奖励 (右上角)
-    plt.subplot(2, 2, 2)
-    eval_rewards = history['eval_rewards']
-    eval_episodes = history['eval_episodes']
-    
-    # 打印调试信息
-    print(f"评估数据: episodes={eval_episodes}, rewards={eval_rewards}")
-    print(f"维度: x_shape={np.array(eval_episodes).shape}, y_shape={np.array(eval_rewards).shape}")
-    
-    # 确保x轴和y轴长度一致
-    if len(eval_episodes) > 0 and len(eval_rewards) > 0:
-        # 使用实际记录的回合数作为x轴数据
-        plt.plot(eval_episodes, eval_rewards, 'ro-', label='评估奖励')
-        
-        # 添加趋势线
-        if len(eval_episodes) > 1:
-            z = np.polyfit(eval_episodes, eval_rewards, 1)
-            p = np.poly1d(z)
-            plt.plot(eval_episodes, p(eval_episodes), "b--", label='趋势线')
-            
-        plt.xlabel('回合')
-        plt.ylabel('评估奖励')
-        plt.title('与随机智能体对战的评估奖励')
-        plt.grid(True)
-        plt.legend()
-    else:
-        print("评估数据为空，跳过绘制评估奖励曲线")
-    
-    # 3. 可利用度 (左下角)
-    plt.subplot(2, 2, 3)
-    exploitability = history.get('exploitability', [])
-    
-    if len(eval_episodes) > 0 and len(exploitability) > 0:
-        plt.plot(eval_episodes, exploitability, 'go-', label='可利用度')
-        
-        # 添加趋势线
-        if len(eval_episodes) > 1:
-            z = np.polyfit(eval_episodes, exploitability, 1)
-            p = np.poly1d(z)
-            plt.plot(eval_episodes, p(eval_episodes), "m--", label='趋势线')
-            
-        plt.xlabel('回合')
-        plt.ylabel('可利用度')
-        plt.title('团队协作可利用度')
-        plt.grid(True)
-        plt.legend()
-    else:
-        print("可利用度数据为空，跳过绘制可利用度曲线")
-    
-    # 4. RL损失和SL损失 (右下角)
-    if nfsp_agents and len(nfsp_agents) > 0:
-        plt.subplot(2, 2, 4)
-        agent = nfsp_agents[0]  # 使用第一个智能体的损失
-        
-        # 创建两个Y轴，左侧显示RL损失，右侧显示SL损失
-        ax1 = plt.gca()
-        ax2 = ax1.twinx()
-        
-        if len(agent.RLlosses) > 0:
-            # 绘制RL损失曲线
-            rl_losses = np.array(agent.RLlosses)
-            # 如果损失数据过多，进行下采样
-            if len(rl_losses) > 1000:
-                step = len(rl_losses) // 1000
-                rl_losses = rl_losses[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(rl_losses))
-            if window_size > 1:
-                smooth_rl_losses = np.convolve(rl_losses, np.ones(window_size)/window_size, mode='valid')
-                ax1.plot(smooth_rl_losses, 'b-', label='平滑RL损失')
-            ax1.plot(rl_losses, 'b-', alpha=0.3, label='原始RL损失')
-            ax1.set_xlabel('训练步数')
-            ax1.set_ylabel('RL损失', color='b')
-            ax1.tick_params(axis='y', labelcolor='b')
-        
-        if len(agent.losses) > 0:
-            # 绘制SL损失曲线
-            sl_losses = np.array(agent.losses)
-            # 如果损失数据过多，进行下采样
-            if len(sl_losses) > 1000:
-                step = len(sl_losses) // 1000
-                sl_losses = sl_losses[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(sl_losses))
-            if window_size > 1:
-                smooth_sl_losses = np.convolve(sl_losses, np.ones(window_size)/window_size, mode='valid')
-                ax2.plot(smooth_sl_losses, 'r-', label='平滑SL损失')
-            ax2.plot(sl_losses, 'r-', alpha=0.3, label='原始SL损失')
-            ax2.set_ylabel('SL损失', color='r')
-            ax2.tick_params(axis='y', labelcolor='r')
-        
-        plt.title('RL和SL损失曲线')
-        
-        # 合并两个轴的图例
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-        
-        plt.grid(True)
     
     plt.tight_layout()
     plt.savefig('./results/training_curve.png')
@@ -341,16 +476,20 @@ def save_history(history, nfsp_agents):
     }
     
     # 添加可利用度数据（如果存在）
-    if 'exploitability' in history:
+    if 'exploitability' in history and history['exploitability']:
         data_to_save['exploitability'] = history['exploitability']
     
-    # 添加智能体损失数据
-    if nfsp_agents and len(nfsp_agents) > 0:
-        agent = nfsp_agents[0]  # 使用第一个智能体的数据
-        data_to_save['rl_losses'] = agent.RLlosses
-        data_to_save['sl_losses'] = agent.losses
-        if hasattr(agent, 'policy_accuracies'):
-            data_to_save['policy_accuracies'] = agent.policy_accuracies
+    # 添加监督学习损失
+    if 'sl_losses' in history and history['sl_losses']:
+        data_to_save['sl_losses'] = history['sl_losses']
+        
+    # 添加强化学习损失
+    if 'rl_losses' in history and history['rl_losses']:
+        data_to_save['rl_losses'] = history['rl_losses']
+        
+    # 添加策略准确率
+    if 'policy_accuracies' in history and history['policy_accuracies']:
+        data_to_save['policy_accuracies'] = history['policy_accuracies']
     
     # 保存为numpy格式
     try:
@@ -361,7 +500,7 @@ def save_history(history, nfsp_agents):
         import traceback
         traceback.print_exc()
 
-def test_agents(env, nfsp_agents, eval_episodes=100, evaluate_exploitability=False, render=True, num_demo_episodes=5):
+def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=True, num_demo_episodes=5):
     """
     测试NFSP智能体性能
     
@@ -369,7 +508,7 @@ def test_agents(env, nfsp_agents, eval_episodes=100, evaluate_exploitability=Fal
         env: 游戏环境
         nfsp_agents: 要测试的NFSP智能体列表
         eval_episodes: 评估回合数
-        evaluate_exploitability: 是否评估团队可利用度
+        eval_explo: 是否评估团队可利用度
         render: 是否渲染演示回合
         num_demo_episodes: 演示回合数量
         
@@ -391,7 +530,7 @@ def test_agents(env, nfsp_agents, eval_episodes=100, evaluate_exploitability=Fal
     results = {}
     
     # 如果指定了评估可利用度
-    if evaluate_exploitability:
+    if eval_explo:
         print("\n评估团队可利用度...\n")
         
         # 创建评估环境

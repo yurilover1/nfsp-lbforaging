@@ -60,6 +60,10 @@ class BaseAgent:
             return None
 
         return r[min_idx], c[min_idx]
+    
+    def _distance_to_food(self, player_pos, food_pos):
+        """计算玩家到食物的曼哈顿距离"""
+        return abs(player_pos[0] - food_pos[0]) + abs(player_pos[1] - food_pos[1])
 
     def _make_state(self, obs):
         state = str(obs.field)
@@ -70,6 +74,4 @@ class BaseAgent:
             state = state + str(a.position[0]) + str(a.position[1]) + str(a.level)
 
         return int(state)
-
-    def cleanup(self):
-        pass
+    

@@ -8,8 +8,6 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import os
 from lbforaging.agents import BaseAgent
-
-# 导入模型和缓冲区类，需要在同一目录下创建这些文件
 from .model import dueling_ddqn, policy
 from .buffer import reservoir_buffer, n_step_replay_buffer, replay_buffer
 from .utils import action_mask
@@ -37,6 +35,7 @@ class NFSPAgent(BaseAgent):
                 rl_batch_size=64,
                 sl_batch_size=64,
                 device=None,
+                hidden_units=64,
                 eval_mode='average'):
         
         super().__init__(player)
@@ -63,9 +62,13 @@ class NFSPAgent(BaseAgent):
         self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
         # 初始化网络
-        self.RL_eval = dueling_ddqn(self.state_size, self.action_size).to(self.device)
-        self.RL_target = dueling_ddqn(self.state_size, self.action_size).to(self.device)
-        self.SL_policy = policy(self.state_size, self.action_size).to(self.device)
+        self.hidden_units = hidden_units
+        self.RL_eval = dueling_ddqn(self.state_size, self.action_size, 
+                                    hidden_units=self.hidden_units).to(self.device)
+        self.RL_target = dueling_ddqn(self.state_size, self.action_size, 
+                                    hidden_units=self.hidden_units).to(self.device)
+        self.SL_policy = policy(self.state_size, self.action_size,
+                                    hidden_units=self.hidden_units).to(self.device)
         
         # 复制Q网络到目标网络
         self.RL_target.load_state_dict(self.RL_eval.state_dict())
@@ -98,7 +101,7 @@ class NFSPAgent(BaseAgent):
         self.losses = []  # SL损失
         self.RLlosses = []  # RL损失
         self.policy_accuracies = []  # 策略准确度记录
-        
+ 
         # 设置matplotlib支持中文
         rcParams['font.family'] = ['Microsoft YaHei']
         
@@ -243,12 +246,29 @@ class NFSPAgent(BaseAgent):
         # 预处理状态
         state = self._preprocess_state(obs)
         
-        # 获取合法动作
-        if hasattr(obs, 'actions'):
+        # 获取合法动作 - 直接使用环境提供的valid_actions
+        if isinstance(obs, dict):
+            if 'actions' in obs:
+                # 优先使用字典中的actions键
+                legal_actions = obs['actions']
+            elif 'obs' in obs and hasattr(obs['obs'], 'actions'):
+                # 然后尝试obs.actions
+                legal_actions = obs['obs'].actions
+            else:
+                # 最后才使用默认动作
+                legal_actions = list(range(self.action_size))
+        elif hasattr(obs, 'actions'):
+            # 直接从observation获取合法动作
             legal_actions = obs.actions
         else:
+            # 默认所有动作都合法
             legal_actions = list(range(self.action_size))
         
+        # 确保legal_actions非空
+        if not legal_actions:
+            print(f"警告: 智能体{self.player.level if hasattr(self.player, 'level') else '?'}收到空的legal_actions列表，使用所有动作")
+            legal_actions = list(range(self.action_size))
+            
         # 将状态转换为张量
         state_tensor = torch.FloatTensor(np.expand_dims(state, 0)).to(self.device)
         
@@ -270,10 +290,22 @@ class NFSPAgent(BaseAgent):
         # 预处理状态
         state = self._preprocess_state(obs)
         
-        # 获取合法动作
-        if hasattr(obs, 'actions'):
+        # 获取合法动作 - 直接使用环境提供的valid_actions
+        if isinstance(obs, dict):
+            if 'actions' in obs:
+                # 优先使用字典中的actions键
+                legal_actions = obs['actions']
+            elif 'obs' in obs and hasattr(obs['obs'], 'actions'):
+                # 然后尝试obs.actions
+                legal_actions = obs['obs'].actions
+            else:
+                # 最后才使用默认动作
+                legal_actions = list(range(self.action_size))
+        elif hasattr(obs, 'actions'):
+            # 直接从observation获取合法动作
             legal_actions = obs.actions
         else:
+            # 默认所有动作都合法
             legal_actions = list(range(self.action_size))
         
         # 将状态转换为张量
@@ -290,7 +322,7 @@ class NFSPAgent(BaseAgent):
         
         # 选择动作
         action = np.random.choice(len(valid_probs), p=valid_probs)
-        return action, valid_probs
+        return action, probs
     
     def add_traj(self, traj):
         """存储轨迹到缓冲区"""
@@ -309,52 +341,6 @@ class NFSPAgent(BaseAgent):
         if len(self.rl_buffer) > self.rl_start and len(self.sl_buffer) > self.sl_start and self.count % self.train_freq == 0:
             self.rl_train()
             self.sl_train()
-    
-    def plot_SL_loss(self, smooth_factor=0.1):
-        """绘制SL损失曲线"""
-        # 创建图形
-        plt.figure(figsize=(10, 6))
-        
-        if len(self.losses) > 0:
-            # 平滑处理
-            smooth_losses = np.copy(self.losses)
-            for i in range(1, len(self.losses)):
-                smooth_losses[i] = smooth_factor * self.losses[i] + (1 - smooth_factor) * smooth_losses[i-1]
-            
-            plt.plot(smooth_losses, label="平滑监督学习损失")
-            plt.plot(self.losses, alpha=0.3, label="原始监督学习损失")
-            plt.xlabel("训练步数")
-            plt.ylabel("损失")
-            plt.title("SL训练损失随时间变化图")
-            plt.legend()
-        
-        # 确保存在保存目录
-        os.makedirs("./plots", exist_ok=True)
-        plt.savefig(f"./plots/nfsp_agent_sl_losses.png")
-        plt.close()
-    
-    def plot_RL_loss(self, smooth_factor=0.1):
-        """绘制RL损失曲线"""
-        # 创建图形
-        plt.figure(figsize=(10, 6))
-        
-        if len(self.RLlosses) > 0:
-            # 平滑处理
-            smooth_RL_losses = np.copy(self.RLlosses)
-            for i in range(1, len(self.RLlosses)):
-                smooth_RL_losses[i] = smooth_factor * self.RLlosses[i] + (1 - smooth_factor) * smooth_RL_losses[i-1]
-            
-            plt.plot(smooth_RL_losses, label="平滑RL损失")
-            plt.plot(self.RLlosses, alpha=0.3, label="原始RL损失")
-            plt.xlabel("训练步数")
-            plt.ylabel("损失")
-            plt.title("RL训练损失随时间变化图")
-            plt.legend()
-        
-        # 确保存在保存目录
-        os.makedirs("./plots", exist_ok=True)
-        plt.savefig(f"./plots/nfsp_agent_rl_losses.png")
-        plt.close()
     
     def save_models(self, path="./models"):
         """保存模型"""
@@ -376,6 +362,13 @@ class NFSPAgent(BaseAgent):
             print(f"找不到模型文件")
             return False
     
+    
+    def plot_losses(self):
+        """同时绘制SL和RL损失曲线"""
+        self.plot_SL_loss()
+        self.plot_RL_loss()
+    
+            
     def plot_losses(self):
         """同时绘制SL和RL损失曲线"""
         self.plot_SL_loss()
@@ -426,11 +419,14 @@ class AveragePolicy:
         if isinstance(state, dict) and 'obs' in state:
             obs = state['obs']
             # 提取合法动作
-            if 'legal_actions' in state:
-                legal_actions = state['legal_actions']
-            elif hasattr(obs, 'actions'):
+            if hasattr(obs, 'actions'):
+                # 原始Observation对象包含actions字段
                 legal_actions = obs.actions
+            elif 'actions' in state:
+                # 如果字典本身包含actions键
+                legal_actions = state['actions']
             else:
+                # 使用默认动作
                 legal_actions = list(range(6))  # 默认6个动作
         else:
             # 如果state本身是观察对象
@@ -464,7 +460,8 @@ class AveragePolicy:
         probs = action_mask(probs, legal_actions)
         
         # 基于概率分布选择动作
-        return np.random.choice(len(probs), p=probs)
+        action = np.random.choice(len(probs), p=probs)
+        return action
 
     def eval_step(self, state):
         return self.step(state), None
@@ -536,22 +533,22 @@ class RandomBestResponse:
     
     def step(self, state):
         # 检查state格式并提取合法动作
-        if isinstance(state, dict) and 'legal_actions' in state:
-            legal_actions = state['legal_actions']
-        elif isinstance(state, dict) and 'obs' in state:
-            # 对于环境传入的观察格式
-            if hasattr(state['obs'], 'actions'):
+        if isinstance(state, dict):
+            if 'actions' in state:
+                # 优先使用字典中的actions键
+                legal_actions = state['actions']
+            elif 'obs' in state and hasattr(state['obs'], 'actions'):
+                # 然后尝试obs.actions
                 legal_actions = state['obs'].actions
             else:
-                # 如果没有指定合法动作，则使用所有可能的动作
+                # 最后才使用默认动作
                 legal_actions = list(range(6))  # 假设有6个可能的动作
+        elif hasattr(state, 'actions'):
+            # 直接从observation获取合法动作
+            legal_actions = state.actions
         else:
-            # 如果state本身是观察对象
-            if hasattr(state, 'actions'):
-                legal_actions = state.actions
-            else:
-                # 默认使用所有动作
-                legal_actions = list(range(6))
+            # 默认使用所有动作
+            legal_actions = list(range(6))
                 
         # 随机选择一个合法动作
         return np.random.choice(legal_actions)
