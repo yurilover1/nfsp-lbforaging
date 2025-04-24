@@ -227,10 +227,10 @@ class ForagingEnv(gym.Env):
                     field_y - 1,
                 ] * len(self.players)
         else:
-            # grid observation space
+            # 网格观测空间
             grid_shape = (1 + 2 * self.sight, 1 + 2 * self.sight)
 
-            # agents layer: agent levels
+            # 智能体层：智能体等级
             agents_min = np.zeros(grid_shape, dtype=np.float32)
             if self._observe_agent_levels:
                 agents_max = np.ones(grid_shape, dtype=np.float32) * max(
@@ -239,24 +239,36 @@ class ForagingEnv(gym.Env):
             else:
                 agents_max = np.ones(grid_shape, dtype=np.float32)
 
-            # foods layer: foods level
+            # 食物层：食物等级
             foods_min = np.zeros(grid_shape, dtype=np.float32)
             foods_max = np.ones(grid_shape, dtype=np.float32) * max_food_level
 
-            # access layer: i the cell available
+            # 可访问层：单元格是否可用
             access_min = np.zeros(grid_shape, dtype=np.float32)
             access_max = np.ones(grid_shape, dtype=np.float32)
 
-            # total layer
-            min_obs = np.stack([agents_min, foods_min, access_min])
-            max_obs = np.stack([agents_max, foods_max, access_max])
+            # 自身标识层：用于标识自己的位置
+            self_min = np.zeros(grid_shape, dtype=np.float32)
+            self_max = np.ones(grid_shape, dtype=np.float32)
+
+            # 完整观测层
+            min_obs = np.stack([agents_min, foods_min, access_min, self_min])
+            max_obs = np.stack([agents_max, foods_max, access_max, self_max])
 
         low_obs = np.array(min_obs)
         high_obs = np.array(max_obs)
         assert low_obs.shape == high_obs.shape
-        return gym.spaces.Box(
-            low=low_obs, high=high_obs, shape=[len(low_obs)], dtype=np.float32
-        )
+        
+        if self._grid_observation:
+            # 对于网格观察模式，形状为 [4, grid_height, grid_width]，包含四个层
+            return gym.spaces.Box(
+                low=low_obs, high=high_obs, dtype=np.float32
+            )
+        else:
+            # 对于非网格观察模式，维持原来的形式
+            return gym.spaces.Box(
+                low=low_obs, high=high_obs, shape=[len(low_obs)], dtype=np.float32
+            )
 
     @classmethod
     def from_obs(cls, obs):
@@ -567,6 +579,7 @@ class ForagingEnv(gym.Env):
             for x, y in zip(foods_x, foods_y):
                 access_layer[x + self.sight, y + self.sight] = 0.0
 
+            # 返回三层堆叠的观测（不再生成self_layer，将改为根据每个智能体区分）
             return np.stack([agents_layer, foods_layer, access_layer])
 
         def get_agent_grid_bounds(agent_x, agent_y):
@@ -577,22 +590,41 @@ class ForagingEnv(gym.Env):
                 agent_y + 2 * self.sight + 1,
             )
 
+        # 获取所有玩家的基本观测
         observations = [self._make_obs(player) for player in self.players]
+        
         if self._grid_observation:
-            layers = make_global_grid_arrays()
-            agents_bounds = [
-                get_agent_grid_bounds(*player.position) for player in self.players
-            ]
-            nobs = tuple(
-                [
-                    layers[:, start_x:end_x, start_y:end_y]
-                    for start_x, end_x, start_y, end_y in agents_bounds
-                ]
-            )
+            # 获取全局网格数组
+            global_layers = make_global_grid_arrays()
+            
+            # 为每个智能体生成各自的观测
+            nobs = []
+            for i, player in enumerate(self.players):
+                # 计算当前智能体观测的边界
+                agent_x, agent_y = player.position
+                start_x, end_x, start_y, end_y = get_agent_grid_bounds(agent_x, agent_y)
+                
+                # 获取当前智能体的视野范围内的网格
+                agent_view = global_layers[:, start_x:end_x, start_y:end_y].copy()
+                
+                # 创建自身识别层 - 只在当前智能体位置标记为1
+                self_layer = np.zeros((end_x-start_x, end_y-start_y), dtype=np.float32)
+                
+                # 计算智能体在视野中的相对坐标
+                rel_agent_x = min(self.sight, agent_x)
+                rel_agent_y = min(self.sight, agent_y)
+                self_layer[rel_agent_x, rel_agent_y] = 1.0
+                
+                # 将自身识别层加入到观测中
+                agent_view_with_self = np.concatenate([agent_view, self_layer[np.newaxis, :, :]], axis=0)
+                
+                nobs.append(agent_view_with_self)
+            
+            nobs = tuple(nobs)
         else:
             nobs = tuple([make_obs_array(obs) for obs in observations])
-
-        # check the space of obs
+        
+        # 检查观测空间
         for i, obs in enumerate(nobs):
             assert self.observation_space[i].contains(
                 obs
@@ -779,7 +811,7 @@ class ForagingEnv(gym.Env):
                 # 提取有效动作
                 valid_actions = [action.value for action in self._valid_actions[player]]
                 
-                # 构建observation字典
+                # 构建observation字典 - 支持网格观察和非网格观察模式
                 obs_dict = {
                     'obs': obss[i],
                     'actions': valid_actions  # 使用实际有效的动作，不是所有动作
@@ -797,8 +829,6 @@ class ForagingEnv(gym.Env):
                     other_valid_actions = [a for a in valid_actions if a != action]
                     if other_valid_actions:  # 确保有其他有效动作可选
                         action = np.random.choice(other_valid_actions)
-                # if len(actions_buffs[i]) >= 3 and actions_buffs[i][-1] == 5 and self.adjacent_food(*player.position):
-                #     action = 5
                 # 记录动作到缓冲区
                 actions_buffs[i].append(action)
                 actions.append(action)
@@ -924,4 +954,17 @@ class ForagingEnv(gym.Env):
                     return True
                     
         return False
+        
+    def update_sight(self, new_sight):
+        """更新视野范围并重新计算观测空间"""
+        old_sight = self.sight
+        self.sight = new_sight
+        
+        # 更新观测空间
+        self.observation_space = gym.spaces.Tuple(
+            tuple([self._get_observation_space()] * len(self.players))
+        )
+        
+        self.logger.info(f"已更新视野范围: {old_sight} -> {new_sight}")
+        return self.observation_space
         

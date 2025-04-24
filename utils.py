@@ -18,22 +18,36 @@ def calculate_state_size(env):
     # 重置环境获取观察
     obss, _ = env.reset()
     
-    # 从观察空间获取信息
-    obs_shape = env.observation_space[0].shape[0]  # 观察空间的总维度
+    # 提取一个观察样本进行分析
+    obs_sample = obss[0]
     
-    # 通过Gymnasium的公开接口获取场地大小和智能体数量
-    field_size = env.field_size[0] * env.field_size[1]  # 场地大小 (rows * cols)
-    n_agents = env.n_agents  # 智能体数量
+    # 特征准备
+    field_size = 0
+    num_players = 0
     
-    # 计算最终状态大小
-    # 场地大小 + 每个智能体4个特征 (x, y, level, is_self)
-    state_size = field_size + (4 * n_agents)
+    # 处理场地信息
+    if hasattr(obs_sample, 'field'):
+        field = obs_sample.field
+        field_size = field.size
     
-    print(f"状态空间大小: field_size={field_size}, n_agents={n_agents}, total={state_size}")
-    print(f"观察空间形状: {obs_shape}")
+    # 处理玩家信息
+    if hasattr(obs_sample, 'players'):
+        num_players = len(obs_sample.players)
     
-    # 使用观察空间大小作为状态大小，确保维度匹配
-    return obs_shape
+    # 检查观察是否为网格观察模式（三维数组）
+    is_grid_observation = False
+    if hasattr(obs_sample, 'shape') and len(obs_sample.shape) == 3:
+        is_grid_observation = True
+        grid_shape = obs_sample.shape
+        grid_size = np.prod(grid_shape)
+        print(f"检测到网格观察模式: 原始形状={grid_shape}, 展平后大小={grid_size}")
+        # 网格观察模式下直接使用展平后的观察大小
+        state_size = grid_size
+    
+    print(f"状态空间大小: total={state_size}")
+    
+    # 返回计算得到的状态大小
+    return state_size
 
 def evaluate(env, agents, num_episodes=100, calculate_exploitability=False, eval_env=None):
     """
@@ -77,7 +91,8 @@ def evaluate(env, agents, num_episodes=100, calculate_exploitability=False, eval
 def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=False, render_interval=100):
     """训练NFSP智能体"""
     # 用于评估的环境，传递与主环境相同的渲染模式
-    eval_env = gym.make("Foraging-5x5-2p-1f-v3", render_mode=None)
+    eval_env = gym.make("Foraging-5x5-2p-1f-v3", sight=2, 
+                   grid_observation=True, render_mode=None)
     
     # 训练历史记录
     history = {
@@ -87,7 +102,7 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
         'exploitability': [],  # 可利用度记录
         'sl_losses': [],       # 监督学习损失
         'rl_losses': [],       # 强化学习损失
-        'policy_accuracies': [] # 策略准确率
+        'policy_accuracies': [], # 策略准确率
     }
     
     # 创建结果目录
@@ -119,7 +134,9 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
                 print(" " * last_status_length, end="\r", flush=True)
             print(f"\n渲染回合 {episode}...")
             # 为渲染创建专门的环境实例
-            render_env = gym.make("Foraging-5x5-2p-1f-v3", render_mode="human")
+            render_env = gym.make("Foraging-5x5-2p-1f-v3", 
+                   render_mode="human", sight=2, 
+                   grid_observation=True, force_coop=False)
             
             # 设置智能体控制器
             for i, agent in enumerate(nfsp_agents):
@@ -182,6 +199,14 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
             # 清除当前行并打印批次完成信息
             print(" " * last_status_length, end="\r", flush=True)
             print(f"\n✓ 完成批次 {current_batch+1}/{total_batches} | 平均团队奖励: {avg_reward:.4f} | 总进度: {overall_progress:.1f}%\n")
+            
+            # # 如果有足够的合作指标数据，计算并显示平均合作指标
+            # if len(history['coop_metrics']) >= 100:
+            #     recent_metrics = history['coop_metrics'][-100:]
+            #     avg_clusters = np.mean([m['player_clusters'] for m in recent_metrics])
+            #     avg_cluster_size = np.mean([m['avg_cluster_size'] for m in recent_metrics if m['avg_cluster_size'] > 0])
+            #     avg_coop_food = np.mean([m['coop_food_count'] for m in recent_metrics])
+            #     print(f"合作指标 | 平均聚集组数: {avg_clusters:.2f} | 平均组大小: {avg_cluster_size:.2f} | 平均合作食物: {avg_coop_food:.2f}\n")
             
             # 更新批次计数
             current_batch += 1
@@ -491,14 +516,162 @@ def save_history(history, nfsp_agents):
     if 'policy_accuracies' in history and history['policy_accuracies']:
         data_to_save['policy_accuracies'] = history['policy_accuracies']
     
+    # 添加合作指标数据
+    if 'coop_metrics' in history and history['coop_metrics']:
+        # 将字典列表转换为结构化的数据格式
+        coop_metrics = history['coop_metrics']
+        
+        # 提取各个指标
+        episodes = [m['episode'] for m in coop_metrics]
+        coop_potential = [m['coop_potential'] for m in coop_metrics]
+        coop_food_count = [m['coop_food_count'] for m in coop_metrics]
+        player_clusters = [m['player_clusters'] for m in coop_metrics]
+        avg_cluster_size = [m['avg_cluster_size'] for m in coop_metrics]
+        food_remaining = [m['food_remaining'] for m in coop_metrics]
+        food_count = [m['food_count'] for m in coop_metrics]
+        
+        # 添加到保存数据中
+        data_to_save['coop_episodes'] = episodes
+        data_to_save['coop_potential'] = coop_potential
+        data_to_save['coop_food_count'] = coop_food_count
+        data_to_save['player_clusters'] = player_clusters
+        data_to_save['avg_cluster_size'] = avg_cluster_size
+        data_to_save['food_remaining'] = food_remaining
+        data_to_save['food_count'] = food_count
+        
+        # 单独保存合作指标数据，方便后续分析
+        np.savez('./results/coop_metrics.npz', 
+                episodes=episodes,
+                coop_potential=coop_potential,
+                coop_food_count=coop_food_count,
+                player_clusters=player_clusters,
+                avg_cluster_size=avg_cluster_size,
+                food_remaining=food_remaining,
+                food_count=food_count)
+    
     # 保存为numpy格式
     try:
         np.savez('./results/training_history.npz', **data_to_save)
         print("训练历史保存成功: ./results/training_history.npz")
+        if 'coop_metrics' in history and history['coop_metrics']:
+            print("合作指标数据保存成功: ./results/coop_metrics.npz")
     except Exception as e:
         print(f"保存训练历史时出错: {e}")
         import traceback
         traceback.print_exc()
+
+def plot_cooperation_metrics(history=None, file_path=None):
+    """
+    绘制合作指标图表
+    
+    参数:
+        history: 训练历史字典，包含合作指标
+        file_path: 已保存的合作指标数据文件路径
+    """
+    # 处理中文显示问题
+    plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+    plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+    
+    # 加载数据
+    if history and 'coop_metrics' in history and history['coop_metrics']:
+        metrics = history['coop_metrics']
+        episodes = [m['episode'] for m in metrics]
+        coop_potential = [m['coop_potential'] for m in metrics]
+        coop_food_count = [m['coop_food_count'] for m in metrics]
+        player_clusters = [m['player_clusters'] for m in metrics]
+        avg_cluster_size = [m['avg_cluster_size'] for m in metrics]
+    elif file_path:
+        try:
+            data = np.load(file_path)
+            episodes = data['episodes']
+            coop_potential = data['coop_potential']
+            coop_food_count = data['coop_food_count']
+            player_clusters = data['player_clusters']
+            avg_cluster_size = data['avg_cluster_size']
+        except Exception as e:
+            print(f"加载合作指标数据时出错: {e}")
+            return
+    else:
+        print("未提供合作指标数据")
+        return
+    
+    # 创建图表
+    plt.figure(figsize=(16, 12))
+    
+    # 1. 合作潜力与食物数量
+    plt.subplot(2, 2, 1)
+    plt.plot(episodes, coop_potential, 'r-', label='合作潜力')
+    plt.plot(episodes, coop_food_count, 'b-', label='需合作食物数')
+    plt.xlabel('回合')
+    plt.ylabel('值')
+    plt.title('合作潜力与需要合作的食物数量')
+    plt.grid(True)
+    plt.legend()
+    
+    # 2. 玩家聚集组数
+    plt.subplot(2, 2, 2)
+    plt.plot(episodes, player_clusters, 'g-', label='玩家聚集组数')
+    plt.xlabel('回合')
+    plt.ylabel('组数')
+    plt.title('玩家聚集组数变化')
+    plt.grid(True)
+    plt.legend()
+    
+    # 3. 平均聚集组大小
+    plt.subplot(2, 2, 3)
+    # 过滤掉0值（可能表示没有聚集）
+    filtered_episodes = []
+    filtered_sizes = []
+    for i, size in enumerate(avg_cluster_size):
+        if size > 0:
+            filtered_episodes.append(episodes[i])
+            filtered_sizes.append(size)
+    
+    plt.plot(filtered_episodes, filtered_sizes, 'm-', label='平均组大小')
+    plt.xlabel('回合')
+    plt.ylabel('平均组大小')
+    plt.title('玩家聚集组平均大小')
+    plt.grid(True)
+    plt.legend()
+    
+    # 4. 合作指标随时间变化的平滑曲线
+    plt.subplot(2, 2, 4)
+    window_size = min(50, len(episodes) // 10) if len(episodes) > 50 else 10
+    
+    # 平滑处理
+    def smooth(data, window_size):
+        if window_size < 2:
+            return data
+        return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
+    
+    if window_size >= 2:
+        smooth_episodes = episodes[window_size-1:]
+        smooth_food_count = smooth(coop_food_count, window_size)
+        smooth_clusters = smooth(player_clusters, window_size)
+        
+        # 计算协作率：聚集组数/需要合作的食物数
+        coop_rate = []
+        for i in range(len(coop_food_count)):
+            if coop_food_count[i] > 0:
+                coop_rate.append(min(player_clusters[i] / coop_food_count[i], 1.0))
+            else:
+                coop_rate.append(0)
+        
+        smooth_coop_rate = smooth(coop_rate, window_size)
+        
+        plt.plot(smooth_episodes, smooth_food_count, 'b-', label='平滑食物数')
+        plt.plot(smooth_episodes, smooth_clusters, 'g-', label='平滑聚集组数')
+        plt.plot(smooth_episodes, smooth_coop_rate, 'r-', label='协作率')
+        plt.xlabel('回合')
+        plt.ylabel('值')
+        plt.title('合作指标趋势分析')
+        plt.grid(True)
+        plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('./results/cooperation_metrics.png')
+    print("合作指标图表已保存: ./results/cooperation_metrics.png")
+    plt.close()
 
 def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=True, num_demo_episodes=5):
     """
@@ -573,6 +746,7 @@ def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=Tr
         # 展示演示回合
         print(f"\n展示{num_demo_episodes}个回合的表现:\n")
         demo_rewards = []
+        coop_metrics = []
         
         for episode in range(num_demo_episodes):
             print(f"回合 {episode + 1}...")
@@ -586,9 +760,21 @@ def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=Tr
                     test_env.players[i].set_controller(agent)
             
             # 运行一个回合并渲染
-            _, rewards = test_env.run(None, is_training=False, render=True, sleep_time=0.5)
+            _, rewards, info = test_env.run(None, is_training=False, render=True, sleep_time=0.5)
             demo_rewards.append(rewards)
-            print(f"回合 {episode + 1} 奖励: {rewards}")
+            
+            # 收集合作指标
+            if info:
+                coop_metrics.append(info)
+                
+                # 打印回合合作指标
+                print(f"回合 {episode + 1} 奖励: {rewards}")
+                if 'coop_food_count' in info:
+                    print(f"需要合作食物: {info['coop_food_count']:.1f}, 玩家聚集组数: {info['player_clusters']:.1f}")
+                if 'avg_cluster_size' in info and info['avg_cluster_size'] > 0:
+                    print(f"平均组大小: {info['avg_cluster_size']:.2f}")
+            else:
+                print(f"回合 {episode + 1} 奖励: {rewards}")
             
             # 关闭环境
             test_env.close()
@@ -596,7 +782,8 @@ def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=Tr
         
         print("\n演示完成！\n")
         
-        # 将演示回合的奖励添加到结果中
+        # 将演示回合的奖励和合作指标添加到结果中
         results['demo_rewards'] = demo_rewards
+        results['demo_coop_metrics'] = coop_metrics
     
     return results

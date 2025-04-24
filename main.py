@@ -19,7 +19,9 @@ def main(args):
     
     # 设置环境和智能体
     render_mode = "human" if args.render else None
-    env = gym.make("Foraging-5x5-2p-1f-v3", render_mode=render_mode)
+    env = gym.make("Foraging-5x5-2p-1f-v3", 
+                   render_mode=render_mode, sight=2, 
+                   grid_observation=True, force_coop=False)
     
     # 计算状态空间大小
     state_size = calculate_state_size(env)
@@ -41,21 +43,22 @@ def main(args):
             player=env.players[i],
             state_size=state_size,
             action_size=action_size,
-            epsilon_init=0.2,                # 提高初始探索率
-            epsilon_decay=20000,             # 减缓探索衰减速度
-            epsilon_min=0.05,               # 提高最小探索率
-            update_freq=50,                # 减少目标网络更新频率
-            sl_lr=0.01,                     # 提高监督学习率
-            rl_lr=0.02,                     # 提高强化学习率
-            sl_buffer_size=5000,            # 增大监督学习缓冲区
-            rl_buffer_size=10000,            # 增大强化学习缓冲区
-            rl_start=1000,                    # 减小RL缓冲区起始大小
-            sl_start=2000,                    # 减小SL缓冲区起始大小
-            train_freq=4,                    # 每步都进行训练
-            gamma=0.99,                      # 折扣因子
-            eta=0.2,                         # 增加平均策略使用概率
-            rl_batch_size=128,
-            sl_batch_size=256,
+            epsilon_init=0.3,                # 增加初始探索率以获取更多样本
+            epsilon_decay=20000,             # 降低衰减速度，保持更长时间的探索
+            epsilon_min=0.05,                # 保持合理的最小探索率
+            update_freq=100,                 # 增加目标网络更新频率
+            sl_lr=0.001,                     # 降低监督学习率以稳定训练
+            rl_lr=0.0005,                    # 降低强化学习率以稳定训练
+            sl_buffer_size=2000,            # 大幅增加监督学习缓冲区大小
+            rl_buffer_size=5000,            # 大幅增加强化学习缓冲区大小
+            rl_start=100,                   # 增加RL训练起始大小
+            sl_start=100,                   # 增加SL训练起始大小
+            train_freq=1,                    # 每步都训练
+            gamma=0.99,                      # 维持折扣因子
+            eta=0.1,                         # 降低平均策略比例，更注重最优策略
+            rl_batch_size=256,               # 增加批量大小提高稳定性
+            sl_batch_size=512,               # 增加批量大小提高稳定性
+            hidden_units=256,                # 增加隐藏单元大小匹配修改后的模型
             device=args.device
         )
         nfsp_agents.append(agent)
@@ -80,7 +83,7 @@ def main(args):
             env,
             nfsp_agents,
             eval_episodes=args.eval_episodes,
-            evaluate_exploitability=args.evaluate_exploitability,
+            eval_explo=args.eval_explo,
             render=args.render,
             num_demo_episodes=5
         )
