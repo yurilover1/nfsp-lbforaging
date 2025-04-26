@@ -212,8 +212,10 @@ class NFSPAgent(BaseAgent):
         if isinstance(obs, np.ndarray):
             # 首先检查是否是三层观测格式 [3,5,5]
             if len(obs.shape) == 3 and obs.shape[0] == 3 and obs.shape[1] == 5 and obs.shape[2] == 5:
-                # 直接展平三层观测
-                return obs.reshape(-1).astype(np.float32)
+                # 直接按权重叠加三层观测
+                # 自身层乘以1，友方层乘以2，食物层乘以3
+                merged_layer = obs[0] * 1 + obs[1] * 2 + obs[2] * 3
+                return merged_layer.reshape(-1).astype(np.float32)
             # 检查是否是标准网格观测格式
             elif len(obs.shape) == 3:
                 # 展平多维数组

@@ -210,7 +210,7 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
                             
                             # 直接添加轨迹，_preprocess_state中会处理数据格式转换
                             nfsp_agents[j].add_traj([obs, action, reward, next_obs, done])
-                            nfsp_agents[j].train()
+                    nfsp_agents[j].train()
                 
                 # 每10个回合保存损失和准确率
                 if episode % 10 == 0 and len(nfsp_agents) > 0:
