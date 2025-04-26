@@ -260,8 +260,12 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
             avg_reward = np.mean(recent_rewards)
             elapsed_time = time.time() - batch_start_time
             
-            # 使用tqdm的set_postfix更新最后一次进度条信息为批次总结
-            pbar.set_postfix_str(f"✓ 批次完成 | 平均奖励: {avg_reward:.4f} | 总用时: {elapsed_time:.1f}秒 | 总进度: {(batch+1)/total_batches*100:.1f}%")
+            # 关闭当前进度条
+            pbar.close()
+            
+            # 打印批次完成信息（使用彩色文本和表情符号使其更明显）
+            batch_summary = f"✅ 批次 {batch+1}/{total_batches} 完成 | 平均奖励: {avg_reward:.4f} | 用时: {elapsed_time:.1f}秒 | 总进度: {(batch+1)/total_batches*100:.1f}%"
+            print(f"\033[92m{batch_summary}\033[0m\n")
             
             # 重置recent_rewards列表
             recent_rewards = []
