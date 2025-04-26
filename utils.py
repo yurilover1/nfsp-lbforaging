@@ -1,53 +1,64 @@
 import numpy as np
 import time
 import os
-import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import gymnasium as gym
 import logging
-import lbforaging  # noqa
-from lbforaging.agents  import RandomAgent
 
 # 添加从nfsp_run.py移动的函数
 logger = logging.getLogger(__name__)
 
 def calculate_state_size(env):
-    """计算状态空间大小"""
-    # 重置环境获取观察
-    obss, _ = env.reset()
-    
-    # 提取一个观察样本进行分析
-    obs_sample = obss[0]
-    
-    # 特征准备
-    field_size = 0
-    num_players = 0
-    
-    # 处理场地信息
-    if hasattr(obs_sample, 'field'):
-        field = obs_sample.field
-        field_size = field.size
-    
-    # 处理玩家信息
-    if hasattr(obs_sample, 'players'):
-        num_players = len(obs_sample.players)
-    
-    # 检查观察是否为网格观察模式（三维数组）
-    is_grid_observation = False
-    if hasattr(obs_sample, 'shape') and len(obs_sample.shape) == 3:
-        is_grid_observation = True
-        grid_shape = obs_sample.shape
-        grid_size = np.prod(grid_shape)
-        print(f"检测到网格观察模式: 原始形状={grid_shape}, 展平后大小={grid_size}")
-        # 网格观察模式下直接使用展平后的观察大小
-        state_size = grid_size
-    
-    print(f"状态空间大小: total={state_size}")
-    
-    # 返回计算得到的状态大小
-    return state_size
+    """计算环境的状态大小"""
+    try:
+        # 获取一个示例观测
+        obs, _ = env.reset()
+        
+        # 如果观测是元组（多智能体环境），取第一个智能体的观测
+        if isinstance(obs, tuple):
+            first_obs = obs[0]
+        else:
+            first_obs = obs
+            
+        # 检查观测形状以判断观测模式
+        if isinstance(first_obs, np.ndarray):
+            # 检查是否为三维数组
+            if len(first_obs.shape) == 3:
+                # 检查是否为三层观测模式 [3, 5, 5]
+                if first_obs.shape[0] == 3 and first_obs.shape[1] == 5 and first_obs.shape[2] == 5:
+                    print(f"检测到三层观测模式: 形状={first_obs.shape}")
+                    return 3 * 5 * 5  # 返回展平后的大小
+                
+                # 检查是否为普通网格观测模式
+                print(f"检测到网格观测模式: 形状={first_obs.shape}")
+                return first_obs.size  # 返回展平后的大小
+            
+            # 普通一维观测
+            print(f"检测到普通观测模式: 形状={first_obs.shape}")
+            return first_obs.size
+            
+        # 尝试从环境获取observation_space
+        if hasattr(env, 'observation_space'):
+            # 尝试获取第一个观测空间的形状
+            obs_shape = env.observation_space[0].shape
+            print(f"从observation_space获取的形状: {obs_shape}")
+            
+            # 如果是多维形状
+            if isinstance(obs_shape, tuple) and len(obs_shape) > 1:
+                # 计算总大小
+                return np.prod(obs_shape)
+            elif isinstance(obs_shape, tuple) and len(obs_shape) > 0:
+                return obs_shape[0]
+        
+        # 默认状态大小
+        print("无法确定状态大小，使用默认值100")
+        return 100
+        
+    except Exception as e:
+        print(f"计算状态大小时出错: {e}")
+        # 默认状态大小
+        return 100
 
 def evaluate(env, agents, num_episodes=100, calculate_exploitability=False, eval_env=None):
     """
@@ -91,8 +102,8 @@ def evaluate(env, agents, num_episodes=100, calculate_exploitability=False, eval
 def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=False, render_interval=100):
     """训练NFSP智能体"""
     # 用于评估的环境，传递与主环境相同的渲染模式
-    eval_env = gym.make("Foraging-5x5-2p-1f-v3", sight=2, 
-                   grid_observation=True, render_mode=None)
+    eval_env = gym.make("Foraging-6x6-2p-3f-v3", sight=3, 
+                   grid_observation=False,  three_layer_obs=True, render_mode=None)
     
     # 训练历史记录
     history = {

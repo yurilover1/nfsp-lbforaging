@@ -41,9 +41,6 @@ class NFSPAgent(BaseAgent):
         super().__init__(player)
         self.name = f"NFSP Agent {player.level if hasattr(player, 'level') else ''}"
         
-        # 初始化动作历史记录
-        self.history = []
-        
         # 基本参数
         self.state_size = state_size
         self.action_size = action_size
@@ -57,27 +54,22 @@ class NFSPAgent(BaseAgent):
         self.rl_start = rl_start
         self.sl_start = sl_start
         self.eval_mode = eval_mode
-        
         # 保存学习率参数
         self.rl_lr = rl_lr
         self.sl_lr = sl_lr
-        
         # 设备设置
         self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        
         # 初始化网络
         self.hidden_units = hidden_units
-        
-        # 记录是否已经初始化了网络
         self.networks_initialized = False
-        
+        # 记录是否已经进行了状态尺寸检查 - 优化性能，避免重复检查
+        self.state_size_checked = False
         # 初始化经验回放缓冲区
         if self.n_step > 1:
             self.rl_buffer = n_step_replay_buffer(rl_buffer_size, self.n_step, self.gamma)
         else:
             self.rl_buffer = replay_buffer(rl_buffer_size)
         self.sl_buffer = reservoir_buffer(sl_buffer_size)
-        
         # epsilon策略
         self.epsilon_init = epsilon_init
         self.epsilon_decay = epsilon_decay
@@ -156,12 +148,17 @@ class NFSPAgent(BaseAgent):
        
     def _ensure_network_compatibility(self, state):
         """确保网络与输入状态大小兼容"""
+        # 如果网络尚未初始化，初始化它
         if not self.networks_initialized:
-            # 如果网络尚未初始化，初始化它
             self._init_networks({'obs': state})
+            self.state_size_checked = True  # 标记已检查状态尺寸
             return True
             
-        # 检查状态大小是否与当前网络匹配
+        # 如果已经检查过状态尺寸兼容性，不再重复检查
+        if self.state_size_checked:
+            return False
+            
+        # 首次检查状态大小是否与当前网络匹配
         state_size = state.shape[0]
         if state_size != self.state_size:
             print(f"检测到状态大小变化: 当前={state_size}, 网络期望={self.state_size}")
@@ -184,8 +181,10 @@ class NFSPAgent(BaseAgent):
             self.RLlosses = old_rl_losses
             self.policy_accuracies = old_accuracies
             
+            self.state_size_checked = True  # 标记已检查状态尺寸
             return True
         
+        self.state_size_checked = True  # 标记已检查状态尺寸
         return False
     
     def choose_policy_mode(self):
@@ -195,21 +194,33 @@ class NFSPAgent(BaseAgent):
     def _preprocess_state(self, obs):
         """
         预处理观察到的状态
-        处理两种类型的观察:
-        1. 网格观察模式 - 包含4个通道的数组:
+        处理三种类型的观察:
+        1. 三层观测模式 - 包含3个通道的5x5数组:
+           - 通道0: 当前智能体层
+           - 通道1: 友方智能体层
+           - 通道2: 食物层
+        2. 网格观察模式 - 包含4个通道的数组:
            - 通道0: 智能体层，显示所有智能体的位置和等级
            - 通道1: 食物层，显示所有食物的位置和等级
            - 通道2: 可访问层，显示哪些位置可访问
            - 通道3: 自身标识层，标识自己的位置
-        2. 标准观察模式 - 包含field和players信息的结构化数据
+        3. 标准观察模式 - 包含field和players信息的结构化数据
         """
         # 如果已经是numpy数组，可能是预处理过的状态
         if isinstance(obs, np.ndarray):
+            # 首先检查是否是三层观测格式 [3,5,5]
+            if len(obs.shape) == 3 and obs.shape[0] == 3 and obs.shape[1] == 5 and obs.shape[2] == 5:
+                # 直接展平三层观测
+                return obs.reshape(-1).astype(np.float32)
+            # 检查是否是标准网格观测格式
+            elif len(obs.shape) == 3:
+                # 展平多维数组
+                return obs.reshape(-1).astype(np.float32)
             # 确保是一维数组
-            if len(obs.shape) == 1:
+            elif len(obs.shape) == 1:
                 return obs.astype(np.float32)
             else:
-                # 展平多维数组
+                # 展平任何其他维度的数组
                 return obs.reshape(-1).astype(np.float32)
         
         # 如果是字典格式，提取'obs'键
@@ -341,8 +352,9 @@ class NFSPAgent(BaseAgent):
         # 预处理状态
         state = self._preprocess_state(obs)
         
-        # 确保网络已初始化并与状态大小兼容
-        self._ensure_network_compatibility(state)
+        # 确保网络已初始化并与状态大小兼容（只在第一次调用时进行完整检查）
+        if not self.networks_initialized or not self.state_size_checked:
+            self._ensure_network_compatibility(state)
         
         # 获取合法动作 - 直接使用环境提供的valid_actions
         if isinstance(obs, dict):
@@ -388,8 +400,9 @@ class NFSPAgent(BaseAgent):
         # 预处理状态
         state = self._preprocess_state(obs)
         
-        # 确保网络已初始化并与状态大小兼容
-        self._ensure_network_compatibility(state)
+        # 确保网络已初始化并与状态大小兼容（只在第一次调用时进行完整检查）
+        if not self.networks_initialized or not self.state_size_checked:
+            self._ensure_network_compatibility(state)
         
         # 获取合法动作 - 直接使用环境提供的valid_actions
         if isinstance(obs, dict):

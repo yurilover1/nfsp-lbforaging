@@ -100,6 +100,7 @@ class ForagingEnv(gym.Env):
         render_mode=None,
         step_reward_factor=0.5,  # 步数奖励因子
         step_reward_threshold=0.1,  # 步数奖励阈值，表示最大步数的比例
+        three_layer_obs=False,  # 新增参数：是否使用三层观测模式
     ):
         self.logger = logging.getLogger(__name__)
         self.render_mode = render_mode
@@ -112,6 +113,10 @@ class ForagingEnv(gym.Env):
         # 步数奖励相关参数
         self.step_reward_factor = step_reward_factor
         self.step_reward_threshold = step_reward_threshold
+
+        # 观测模式设置
+        self._grid_observation = grid_observation
+        self._three_layer_obs = three_layer_obs  # 是否使用三层观测模式
 
         if isinstance(min_food_level, Iterable):
             assert (
@@ -177,7 +182,6 @@ class ForagingEnv(gym.Env):
         self._max_episode_steps = max_episode_steps
 
         self._normalize_reward = normalize_reward
-        self._grid_observation = grid_observation
         self._observe_agent_levels = observe_agent_levels
 
         self.action_space = gym.spaces.Tuple(
@@ -206,7 +210,7 @@ class ForagingEnv(gym.Env):
             if self.max_food_level is not None
             else sum(player_levels[:3])
         )
-        if not self._grid_observation:
+        if not self._grid_observation and not self._three_layer_obs:
             field_x = self.field.shape[1]
             field_y = self.field.shape[0]
             # field_size = field_x * field_y
@@ -226,6 +230,25 @@ class ForagingEnv(gym.Env):
                     field_x - 1,
                     field_y - 1,
                 ] * len(self.players)
+        elif self._three_layer_obs:
+            # 三层观测模式，返回当前智能体、友方智能体和食物三层各5*5的观测
+            grid_shape = (5, 5)
+
+            # 当前智能体层
+            self_agent_min = np.zeros(grid_shape, dtype=np.float32)
+            self_agent_max = np.ones(grid_shape, dtype=np.float32) * max(self.max_player_level) if self._observe_agent_levels else np.ones(grid_shape, dtype=np.float32)
+            
+            # 友方智能体层
+            other_agents_min = np.zeros(grid_shape, dtype=np.float32)
+            other_agents_max = np.ones(grid_shape, dtype=np.float32) * max(self.max_player_level) if self._observe_agent_levels else np.ones(grid_shape, dtype=np.float32)
+            
+            # 食物层
+            foods_min = np.zeros(grid_shape, dtype=np.float32)
+            foods_max = np.ones(grid_shape, dtype=np.float32) * max_food_level
+            
+            # 三层堆叠
+            min_obs = np.stack([self_agent_min, other_agents_min, foods_min])
+            max_obs = np.stack([self_agent_max, other_agents_max, foods_max])
         else:
             # 网格观测空间
             grid_shape = (1 + 2 * self.sight, 1 + 2 * self.sight)
@@ -259,8 +282,8 @@ class ForagingEnv(gym.Env):
         high_obs = np.array(max_obs)
         assert low_obs.shape == high_obs.shape
         
-        if self._grid_observation:
-            # 对于网格观察模式，形状为 [4, grid_height, grid_width]，包含四个层
+        if self._grid_observation or self._three_layer_obs:
+            # 对于网格观察模式，形状为观测层数量 x 高度 x 宽度
             return gym.spaces.Box(
                 low=low_obs, high=high_obs, dtype=np.float32
             )
@@ -392,10 +415,10 @@ class ForagingEnv(gym.Env):
 
             self.field[row, col] = (
                 min_levels[food_count]
-                if min_levels[food_count] == max_levels[food_count]
-                else self.np_random.integers(
-                    min_levels[food_count], max_levels[food_count] + 1
-                )
+                # if min_levels[food_count] == max_levels[food_count]
+                # else self.np_random.integers(
+                #     min_levels[food_count], max_levels[food_count] + 1
+                # )
             )
             food_count += 1
         self._food_spawned = self.field.sum()
@@ -542,7 +565,7 @@ class ForagingEnv(gym.Env):
 
         def make_global_grid_arrays():
             """
-            Create global arrays for grid observation space
+            创建全局网格数组
             """
             grid_shape_x, grid_shape_y = self.field_size
             grid_shape_x += 2 * self.sight
@@ -581,7 +604,7 @@ class ForagingEnv(gym.Env):
 
             # 返回三层堆叠的观测（不再生成self_layer，将改为根据每个智能体区分）
             return np.stack([agents_layer, foods_layer, access_layer])
-
+            
         def get_agent_grid_bounds(agent_x, agent_y):
             return (
                 agent_x,
@@ -589,11 +612,65 @@ class ForagingEnv(gym.Env):
                 agent_y,
                 agent_y + 2 * self.sight + 1,
             )
+            
+        def make_three_layer_observation():
+            """
+            创建三层观测模式：当前智能体、友方智能体和食物
+            """
+            # 创建一个全局的5x5场景
+            grid_size = 5
+            grid_shape = (grid_size, grid_size)
+            
+            # 获取所有玩家的观测结果
+            nobs = []
+            for i, current_player in enumerate(self.players):
+                # 创建三个层
+                self_layer = np.zeros(grid_shape, dtype=np.float32)
+                other_agents_layer = np.zeros(grid_shape, dtype=np.float32)
+                food_layer = np.zeros(grid_shape, dtype=np.float32)
+                
+                # 计算视野中心
+                center_x, center_y = current_player.position
+                
+                # 遍历5x5视野区域
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        # 计算绝对坐标
+                        abs_x = center_x + dx
+                        abs_y = center_y + dy
+                        
+                        # 坐标转换为5x5网格中的位置
+                        grid_x = dx + 2
+                        grid_y = dy + 2
+                        
+                        # 检查是否在场景内
+                        if 0 <= abs_x < self.rows and 0 <= abs_y < self.cols:
+                            # 检查是否为当前智能体
+                            if abs_x == center_x and abs_y == center_y:
+                                self_layer[grid_x, grid_y] = current_player.level if self._observe_agent_levels else 1
+                            
+                            # 检查是否有其他智能体
+                            for player in self.players:
+                                if player != current_player and player.position == (abs_x, abs_y):
+                                    other_agents_layer[grid_x, grid_y] = player.level if self._observe_agent_levels else 1
+                            
+                            # 检查是否有食物
+                            if self.field[abs_x, abs_y] > 0:
+                                food_layer[grid_x, grid_y] = self.field[abs_x, abs_y]
+                
+                # 将三层堆叠起来
+                agent_obs = np.stack([self_layer, other_agents_layer, food_layer])
+                nobs.append(agent_obs)
+                
+            return tuple(nobs)
 
         # 获取所有玩家的基本观测
         observations = [self._make_obs(player) for player in self.players]
         
-        if self._grid_observation:
+        if self._three_layer_obs:
+            # 使用三层观测模式
+            nobs = make_three_layer_observation()
+        elif self._grid_observation:
             # 获取全局网格数组
             global_layers = make_global_grid_arrays()
             
