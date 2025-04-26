@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import gymnasium as gym
 import logging
+from tqdm import tqdm
 
 # 添加从nfsp_run.py移动的函数
 logger = logging.getLogger(__name__)
@@ -126,158 +127,149 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
     current_batch = 0
     total_batches = num_episodes // 100
     
-    # 记录最后显示的状态文本长度
-    last_status_length = 0
-    
     print(f"\n开始训练 - 总共 {num_episodes} 回合 ({total_batches} 批次)...\n")
     
-    for episode in range(num_episodes):
-        # 在每个回合开始时选择策略模式
-        for agent in nfsp_agents:
-            agent.choose_policy_mode()
+    # 外层循环处理每个批次
+    for batch in range(total_batches):
+        # 为每个批次创建一个tqdm进度条
+        batch_start_time = time.time()
+        batch_size = min(100, num_episodes - batch * 100)  # 处理最后一个不完整批次
+        
+        # 创建当前批次的进度条
+        with tqdm(total=batch_size, desc=f"批次 {batch+1}/{total_batches}", 
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            
+            # 记录当前批次的奖励
+            batch_rewards = []
+            
+            # 处理当前批次中的每个回合
+            for i in range(batch_size):
+                episode = batch * 100 + i
+                
+                # 在每个回合开始时选择策略模式
+                for agent in nfsp_agents:
+                    agent.choose_policy_mode()
 
-        # 判断是否需要在本回合渲染
-        should_render = render and episode % render_interval == 0
-        
-        if should_render:
-            # 清除当前行
-            if last_status_length > 0:
-                print(" " * last_status_length, end="\r", flush=True)
-            print(f"\n渲染回合 {episode}...")
-           
-            # 运行一个完整回合，并渲染
-            trajectories, payoffs = env.run(
-                nfsp_agents,
-                is_training=True,
-                render=True, 
-                sleep_time=0.5
-            )
+                # 判断是否需要在本回合渲染
+                should_render = render and episode % render_interval == 0
+                
+                if should_render:
+                    print(f"\n渲染回合 {episode}...")
+                   
+                    # 运行一个完整回合，并渲染
+                    trajectories, payoffs = env.run(
+                        nfsp_agents,
+                        is_training=True,
+                        render=True, 
+                        sleep_time=0.5
+                    )
+                    # 暂停进度条更新
+                    pbar.clear()
 
-        else:
-            # 正常训练，不渲染
-            trajectories, payoffs = env.run(
-                nfsp_agents, 
-                is_training=True,
-                render=False
-            )
-        
-        # 记录每个回合的奖励
-        history['episode_rewards'].append(payoffs)
-        
-        # 计算团队总奖励（智能体奖励之和）
-        team_reward = sum(payoffs)
-        recent_rewards.append(team_reward)
-        
-        # 计算当前100轮内的进度（0-99）
-        current_progress = episode % 100
-        progress_percent = current_progress + 1  # 进度从1%到100%
-        
-        # 创建动态进度条
-        bar_length = 20  # 减少进度条长度，避免行太长
-        block = int(bar_length * progress_percent / 100)
-        progress_bar = '█' * block + '░' * (bar_length - block)
-        
-        # 计算总体完成进度
-        overall_progress = (episode + 1) / num_episodes * 100
-        
-        # 使用\r在同一行更新进度，固定状态文本的宽度以确保完全覆盖前一行
-        status_text = f"批次: {current_batch+1}/{total_batches} | 进度: [{progress_bar}] {progress_percent:3d}%| 奖励: {team_reward:.2f}"
-        
-        # 先清除前一行，再打印新状态
-        clear_line = " " * max(last_status_length, len(status_text))
-        print(clear_line, end="\r", flush=True)
-        print(status_text, end="\r", flush=True)
-        
-        # 更新状态行长度
-        last_status_length = len(status_text)
-        
-        # 每100轮显示平均奖励并重置进度条
-        if (episode + 1) % 100 == 0:
-            # 计算最近100回合的平均奖励
+                else:
+                    # 正常训练，不渲染
+                    trajectories, payoffs = env.run(
+                        nfsp_agents, 
+                        is_training=True,
+                        render=False
+                    )
+                
+                # 记录每个回合的奖励
+                history['episode_rewards'].append(payoffs)
+                
+                # 计算团队总奖励（智能体奖励之和）
+                team_reward = sum(payoffs)
+                recent_rewards.append(team_reward)
+                batch_rewards.append(team_reward)
+                
+                # 更新进度条
+                avg_batch_reward = sum(batch_rewards) / len(batch_rewards)
+                elapsed_time = time.time() - batch_start_time
+                pbar.set_postfix({
+                    '奖励': f'{team_reward:.2f}', 
+                    '平均': f'{avg_batch_reward:.2f}',
+                    '用时': f'{elapsed_time:.1f}s'
+                })
+                pbar.update(1)
+                
+                # 存储轨迹并训练
+                for j in range(env.n_agents):
+                    for ts in trajectories[j]:
+                        if len(ts) > 0:
+                            # ts结构：[obs_dict, action, reward, next_obs_dict, done]
+                            # 首先获取预处理后的状态
+                            obs = nfsp_agents[j]._preprocess_state(ts[0])
+                            action = ts[1]
+                            reward = ts[2]
+                            next_obs = None if ts[4] else nfsp_agents[j]._preprocess_state(ts[3])
+                            done = ts[4]
+                            
+                            # 如果是终止状态，则使用当前状态作为下一状态
+                            if next_obs is None:
+                                next_obs = obs
+                            
+                            # 直接添加轨迹，_preprocess_state中会处理数据格式转换
+                            nfsp_agents[j].add_traj([obs, action, reward, next_obs, done])
+                            nfsp_agents[j].train()
+                
+                # 每10个回合保存损失和准确率
+                if episode % 10 == 0 and len(nfsp_agents) > 0:
+                    # 使用第一个智能体的损失数据
+                    agent = nfsp_agents[0]
+                    # 保存SL损失
+                    if len(agent.losses) > 0:
+                        history['sl_losses'].append(agent.losses[-1])
+                    # 保存RL损失
+                    if len(agent.RLlosses) > 0:
+                        history['rl_losses'].append(agent.RLlosses[-1])
+                    # 保存策略准确率
+                    if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > 0:
+                        history['policy_accuracies'].append(agent.policy_accuracies[-1])
+                
+                # 定期评估
+                if episode % eval_interval == 0 or episode == num_episodes - 1:
+                    try:
+                        pbar.clear()  # 暂时清除进度条显示
+                        
+                        # 计算普通奖励和可利用度
+                        eval_rewards, exploitability = evaluate(
+                            env, 
+                            nfsp_agents, 
+                            num_episodes=10, 
+                            calculate_exploitability=True,
+                            eval_env=eval_env
+                        )
+                        
+                        # 确保eval_rewards是一个单一值，并记录当前回合数
+                        agent0_reward = eval_rewards[0]
+                        history['eval_rewards'].append(agent0_reward)
+                        history['eval_episodes'].append(episode)  # 记录评估回合
+                        history['exploitability'].append(exploitability)  # 记录可利用度
+                        
+                        # 打印评估信息
+                        # print(f"\n评估 - 回合 {episode}/{num_episodes}: 奖励={eval_rewards}, 可利用度={exploitability:.4f}")
+                        
+                        # 恢复进度条显示
+                        pbar.display()
+                    except Exception as e:
+                        print(f"\n评估过程中发生错误: {e}")
+                        import traceback
+                        traceback.print_exc()
+            
+            # 批次完成后显示平均奖励
             avg_reward = np.mean(recent_rewards)
+            elapsed_time = time.time() - batch_start_time
             
-            # 清除当前行并打印批次完成信息
-            print(" " * last_status_length, end="\r", flush=True)
-            print(f"\n✓ 完成批次 {current_batch+1}/{total_batches} | 平均团队奖励: {avg_reward:.4f} | 总进度: {overall_progress:.1f}%\n")
+            # 关闭当前进度条
+            pbar.close()
             
-            # 更新批次计数
-            current_batch += 1
+            # 打印批次完成信息（使用彩色文本和表情符号使其更明显）
+            batch_summary = f"✅ 批次 {batch+1}/{total_batches} 完成 | 平均奖励: {avg_reward:.4f} | 用时: {elapsed_time:.1f}秒 | 总进度: {(batch+1)/total_batches*100:.1f}%"
+            print(f"\033[92m{batch_summary}\033[0m\n")
             
             # 重置recent_rewards列表
             recent_rewards = []
-            
-            # 重置状态行长度（因为下一行会从头开始）
-            last_status_length = 0
-        
-        # 存储轨迹并训练
-        for i in range(env.n_agents):
-            for ts in trajectories[i]:
-                if len(ts) > 0:
-                    # ts结构：[obs_dict, action, reward, next_obs_dict, done]
-                    # 首先获取预处理后的状态
-                    obs = nfsp_agents[i]._preprocess_state(ts[0])
-                    action = ts[1]
-                    reward = ts[2]
-                    next_obs = None if ts[4] else nfsp_agents[i]._preprocess_state(ts[3])
-                    done = ts[4]
-                    
-                    # 如果是终止状态，则使用当前状态作为下一状态
-                    if next_obs is None:
-                        next_obs = obs
-                    
-                    # 直接添加轨迹，_preprocess_state中会处理数据格式转换
-                    nfsp_agents[i].add_traj([obs, action, reward, next_obs, done])
-                    nfsp_agents[i].train()
-        
-        # 每10个回合保存损失和准确率
-        if episode % 10 == 0 and len(nfsp_agents) > 0:
-            # 使用第一个智能体的损失数据
-            agent = nfsp_agents[0]
-            # 保存SL损失
-            if len(agent.losses) > 0:
-                history['sl_losses'].append(agent.losses[-1])
-            # 保存RL损失
-            if len(agent.RLlosses) > 0:
-                history['rl_losses'].append(agent.RLlosses[-1])
-            # 保存策略准确率
-            if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > 0:
-                history['policy_accuracies'].append(agent.policy_accuracies[-1])
-        
-        # 定期评估
-        if episode % eval_interval == 0 or episode == num_episodes - 1:
-            try:
-                # 清除当前行，确保评估信息从新行开始
-                if last_status_length > 0:
-                    print(" " * last_status_length, end="\r", flush=True)
-                
-                # 重置状态行长度
-                last_status_length = 0
-                
-                # 计算普通奖励和可利用度
-                eval_rewards, exploitability = evaluate(
-                    env, 
-                    nfsp_agents, 
-                    num_episodes=10, 
-                    calculate_exploitability=True,
-                    eval_env=eval_env
-                )
-                
-                # 确保eval_rewards是一个单一值，并记录当前回合数
-                agent0_reward = eval_rewards[0]
-                history['eval_rewards'].append(agent0_reward)
-                history['eval_episodes'].append(episode)  # 记录评估回合
-                history['exploitability'].append(exploitability)  # 记录可利用度
-                
-                # 打印评估信息
-                print(f"\n评估 - 回合 {episode}/{num_episodes}: 奖励={eval_rewards}, 可利用度={exploitability:.4f}\n")
-            except Exception as e:
-                print(f"\n评估过程中发生错误: {e}")
-                import traceback
-                traceback.print_exc()
     
-    # 训练结束，清空最后一行
-    if last_status_length > 0:
-        print(" " * last_status_length, end="\r", flush=True)
     print("\n训练完成！\n")
     
     # 保存模型
@@ -508,162 +500,14 @@ def save_history(history, nfsp_agents):
     if 'policy_accuracies' in history and history['policy_accuracies']:
         data_to_save['policy_accuracies'] = history['policy_accuracies']
     
-    # 添加合作指标数据
-    if 'coop_metrics' in history and history['coop_metrics']:
-        # 将字典列表转换为结构化的数据格式
-        coop_metrics = history['coop_metrics']
-        
-        # 提取各个指标
-        episodes = [m['episode'] for m in coop_metrics]
-        coop_potential = [m['coop_potential'] for m in coop_metrics]
-        coop_food_count = [m['coop_food_count'] for m in coop_metrics]
-        player_clusters = [m['player_clusters'] for m in coop_metrics]
-        avg_cluster_size = [m['avg_cluster_size'] for m in coop_metrics]
-        food_remaining = [m['food_remaining'] for m in coop_metrics]
-        food_count = [m['food_count'] for m in coop_metrics]
-        
-        # 添加到保存数据中
-        data_to_save['coop_episodes'] = episodes
-        data_to_save['coop_potential'] = coop_potential
-        data_to_save['coop_food_count'] = coop_food_count
-        data_to_save['player_clusters'] = player_clusters
-        data_to_save['avg_cluster_size'] = avg_cluster_size
-        data_to_save['food_remaining'] = food_remaining
-        data_to_save['food_count'] = food_count
-        
-        # 单独保存合作指标数据，方便后续分析
-        np.savez('./results/coop_metrics.npz', 
-                episodes=episodes,
-                coop_potential=coop_potential,
-                coop_food_count=coop_food_count,
-                player_clusters=player_clusters,
-                avg_cluster_size=avg_cluster_size,
-                food_remaining=food_remaining,
-                food_count=food_count)
-    
     # 保存为numpy格式
     try:
         np.savez('./results/training_history.npz', **data_to_save)
         print("训练历史保存成功: ./results/training_history.npz")
-        if 'coop_metrics' in history and history['coop_metrics']:
-            print("合作指标数据保存成功: ./results/coop_metrics.npz")
     except Exception as e:
         print(f"保存训练历史时出错: {e}")
         import traceback
         traceback.print_exc()
-
-def plot_cooperation_metrics(history=None, file_path=None):
-    """
-    绘制合作指标图表
-    
-    参数:
-        history: 训练历史字典，包含合作指标
-        file_path: 已保存的合作指标数据文件路径
-    """
-    # 处理中文显示问题
-    plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-    plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
-    
-    # 加载数据
-    if history and 'coop_metrics' in history and history['coop_metrics']:
-        metrics = history['coop_metrics']
-        episodes = [m['episode'] for m in metrics]
-        coop_potential = [m['coop_potential'] for m in metrics]
-        coop_food_count = [m['coop_food_count'] for m in metrics]
-        player_clusters = [m['player_clusters'] for m in metrics]
-        avg_cluster_size = [m['avg_cluster_size'] for m in metrics]
-    elif file_path:
-        try:
-            data = np.load(file_path)
-            episodes = data['episodes']
-            coop_potential = data['coop_potential']
-            coop_food_count = data['coop_food_count']
-            player_clusters = data['player_clusters']
-            avg_cluster_size = data['avg_cluster_size']
-        except Exception as e:
-            print(f"加载合作指标数据时出错: {e}")
-            return
-    else:
-        print("未提供合作指标数据")
-        return
-    
-    # 创建图表
-    plt.figure(figsize=(16, 12))
-    
-    # 1. 合作潜力与食物数量
-    plt.subplot(2, 2, 1)
-    plt.plot(episodes, coop_potential, 'r-', label='合作潜力')
-    plt.plot(episodes, coop_food_count, 'b-', label='需合作食物数')
-    plt.xlabel('回合')
-    plt.ylabel('值')
-    plt.title('合作潜力与需要合作的食物数量')
-    plt.grid(True)
-    plt.legend()
-    
-    # 2. 玩家聚集组数
-    plt.subplot(2, 2, 2)
-    plt.plot(episodes, player_clusters, 'g-', label='玩家聚集组数')
-    plt.xlabel('回合')
-    plt.ylabel('组数')
-    plt.title('玩家聚集组数变化')
-    plt.grid(True)
-    plt.legend()
-    
-    # 3. 平均聚集组大小
-    plt.subplot(2, 2, 3)
-    # 过滤掉0值（可能表示没有聚集）
-    filtered_episodes = []
-    filtered_sizes = []
-    for i, size in enumerate(avg_cluster_size):
-        if size > 0:
-            filtered_episodes.append(episodes[i])
-            filtered_sizes.append(size)
-    
-    plt.plot(filtered_episodes, filtered_sizes, 'm-', label='平均组大小')
-    plt.xlabel('回合')
-    plt.ylabel('平均组大小')
-    plt.title('玩家聚集组平均大小')
-    plt.grid(True)
-    plt.legend()
-    
-    # 4. 合作指标随时间变化的平滑曲线
-    plt.subplot(2, 2, 4)
-    window_size = min(50, len(episodes) // 10) if len(episodes) > 50 else 10
-    
-    # 平滑处理
-    def smooth(data, window_size):
-        if window_size < 2:
-            return data
-        return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
-    
-    if window_size >= 2:
-        smooth_episodes = episodes[window_size-1:]
-        smooth_food_count = smooth(coop_food_count, window_size)
-        smooth_clusters = smooth(player_clusters, window_size)
-        
-        # 计算协作率：聚集组数/需要合作的食物数
-        coop_rate = []
-        for i in range(len(coop_food_count)):
-            if coop_food_count[i] > 0:
-                coop_rate.append(min(player_clusters[i] / coop_food_count[i], 1.0))
-            else:
-                coop_rate.append(0)
-        
-        smooth_coop_rate = smooth(coop_rate, window_size)
-        
-        plt.plot(smooth_episodes, smooth_food_count, 'b-', label='平滑食物数')
-        plt.plot(smooth_episodes, smooth_clusters, 'g-', label='平滑聚集组数')
-        plt.plot(smooth_episodes, smooth_coop_rate, 'r-', label='协作率')
-        plt.xlabel('回合')
-        plt.ylabel('值')
-        plt.title('合作指标趋势分析')
-        plt.grid(True)
-        plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig('./results/cooperation_metrics.png')
-    print("合作指标图表已保存: ./results/cooperation_metrics.png")
-    plt.close()
 
 def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=True, num_demo_episodes=5):
     """
