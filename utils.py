@@ -144,26 +144,15 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
             if last_status_length > 0:
                 print(" " * last_status_length, end="\r", flush=True)
             print(f"\n渲染回合 {episode}...")
-            # 为渲染创建专门的环境实例
-            render_env = gym.make("Foraging-5x5-2p-1f-v3", 
-                   render_mode="human", sight=2, 
-                   grid_observation=True, force_coop=False)
-            
-            # 设置智能体控制器
-            for i, agent in enumerate(nfsp_agents):
-                if i < len(render_env.players):
-                    render_env.players[i].set_controller(agent)
-            
+           
             # 运行一个完整回合，并渲染
-            trajectories, payoffs = render_env.run(
-                None,  # 已经设置了控制器，所以传None
+            trajectories, payoffs = env.run(
+                nfsp_agents,
                 is_training=True,
                 render=True, 
                 sleep_time=0.5
             )
-            
-            # 关闭渲染环境
-            render_env.close()
+
         else:
             # 正常训练，不渲染
             trajectories, payoffs = env.run(
@@ -210,14 +199,6 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
             # 清除当前行并打印批次完成信息
             print(" " * last_status_length, end="\r", flush=True)
             print(f"\n✓ 完成批次 {current_batch+1}/{total_batches} | 平均团队奖励: {avg_reward:.4f} | 总进度: {overall_progress:.1f}%\n")
-            
-            # # 如果有足够的合作指标数据，计算并显示平均合作指标
-            # if len(history['coop_metrics']) >= 100:
-            #     recent_metrics = history['coop_metrics'][-100:]
-            #     avg_clusters = np.mean([m['player_clusters'] for m in recent_metrics])
-            #     avg_cluster_size = np.mean([m['avg_cluster_size'] for m in recent_metrics if m['avg_cluster_size'] > 0])
-            #     avg_coop_food = np.mean([m['coop_food_count'] for m in recent_metrics])
-            #     print(f"合作指标 | 平均聚集组数: {avg_clusters:.2f} | 平均组大小: {avg_cluster_size:.2f} | 平均合作食物: {avg_coop_food:.2f}\n")
             
             # 更新批次计数
             current_batch += 1

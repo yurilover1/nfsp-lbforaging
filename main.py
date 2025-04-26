@@ -60,6 +60,7 @@ def main(args):
             rl_batch_size=128,               # 减少批量大小，防止过拟合
             sl_batch_size=256,               # 减少批量大小，防止过拟合
             hidden_units=256,                # 减小隐藏单元，简化模型
+            layers=args.layers,
             device=args.device
         )
         nfsp_agents.append(agent)
@@ -111,7 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_explo", action="store_true", help="评估团队可利用度")
     parser.add_argument("--eval_episodes", type=int, default=100, help="评估回合数")
     parser.add_argument("--device", type=str, default="cuda:0", help="设备类型")
-    
+    parser.add_argument("--layers", type=int, default=5, help="神经网络层数")
     args = parser.parse_args()
     main(args)
 

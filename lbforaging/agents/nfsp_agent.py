@@ -36,6 +36,7 @@ class NFSPAgent(BaseAgent):
                 sl_batch_size=64,
                 device=None,
                 hidden_units=64,
+                layers=3,
                 eval_mode='average'):
         
         super().__init__(player)
@@ -62,6 +63,7 @@ class NFSPAgent(BaseAgent):
         # 初始化网络
         self.hidden_units = hidden_units
         self.networks_initialized = False
+        self.layers = layers
         # 记录是否已经进行了状态尺寸检查 - 优化性能，避免重复检查
         self.state_size_checked = False
         # 初始化经验回放缓冲区
@@ -123,10 +125,10 @@ class NFSPAgent(BaseAgent):
         self.action_size = 6
 
         self.rl_eval_network = dueling_ddqn(self.state_size, self.action_size, 
-                                hidden_units=self.hidden_units).to(self.device)
+                                hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
         
         self.rl_target_network = dueling_ddqn(self.state_size, self.action_size, 
-                                    hidden_units=self.hidden_units).to(self.device)
+                                hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
         
         self.rl_target_network.load_state_dict(self.rl_eval_network.state_dict())
         
@@ -135,7 +137,7 @@ class NFSPAgent(BaseAgent):
         
         # 初始化监督学习策略网络
         self.sl_policy = policy(self.state_size, self.action_size,
-                                    hidden_units=self.hidden_units).to(self.device)
+                                    hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
         
         # 为SL网络设置优化器
         self.sl_optimizer = torch.optim.Adam(self.sl_policy.parameters(), lr=self.sl_lr)
