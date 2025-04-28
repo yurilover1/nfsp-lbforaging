@@ -618,7 +618,7 @@ class ForagingEnv(gym.Env):
             创建三层观测模式：当前智能体、友方智能体和食物
             """
             # 创建一个全局的5x5场景
-            grid_size = 5
+            grid_size = 6
             grid_shape = (grid_size, grid_size)
             
             # 获取所有玩家的观测结果
@@ -633,15 +633,15 @@ class ForagingEnv(gym.Env):
                 center_x, center_y = current_player.position
                 
                 # 遍历5x5视野区域
-                for dx in range(-2, 3):
-                    for dy in range(-2, 3):
+                for dx in range(-3, 2):
+                    for dy in range(-3, 2):
                         # 计算绝对坐标
                         abs_x = center_x + dx
                         abs_y = center_y + dy
                         
                         # 坐标转换为5x5网格中的位置
-                        grid_x = dx + 2
-                        grid_y = dy + 2
+                        grid_x = dx + 3
+                        grid_y = dy + 3
                         
                         # 检查是否在场景内
                         if 0 <= abs_x < self.rows and 0 <= abs_y < self.cols:

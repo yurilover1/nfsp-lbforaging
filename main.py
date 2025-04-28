@@ -1,118 +1,220 @@
-import time
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+3D LB Foraging环境测试与可视化程序
+"""
+
 import os
-import argparse
+import sys
+import time
 import numpy as np
-import matplotlib.pyplot as plt
-import gymnasium as gym
-import logging
-import lbforaging  # noqa
-from lbforaging.agents import NFSPAgent
-from utils import calculate_state_size, evaluate, train_agents, plot_training_curve, save_history, test_agents
-
-
-logger = logging.getLogger(__name__)
+import argparse
+from lbforaging.foraging.environment_3d import ForagingEnv3D
 
 def main(args):
-    """主函数，训练并测试NFSP智能体"""
-    # 配置日志记录
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
+    """主函数：创建并运行3D环境"""
+    # 创建环境
+    env = ForagingEnv3D(
+        n_rows=args.rows,
+        n_cols=args.cols,
+        n_depth=args.depth,
+        num_agents=args.agents,
+        num_food=args.food,
+        sight=args.sight,
+        max_player_level=args.max_player_level,
+        max_food_level=args.max_food_level,
+        min_player_level=args.min_player_level,
+        min_food_level=args.min_food_level,
+        force_coop=args.force_coop,
+        grid_observation=True,
+        max_episode_steps=args.max_steps
+    )
     
-    # 设置环境和智能体
-    render_mode = "human" if args.render else None
-    env = gym.make("Foraging-6x6-2p-3f-v3", 
-                   render_mode=render_mode, sight=3, 
-                   three_layer_obs=True, force_coop=False)
+    # 设置随机种子
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        env.seed(args.seed)
     
-    # 计算状态空间大小
-    state_size = calculate_state_size(env)
-    print(f"计算得到的状态空间大小: {state_size}")
-    action_size = 6  # (NONE, NORTH, SOUTH, WEST, EAST, LOAD)
-    
-    # 创建NFSP智能体
-    nfsp_agents = []
-    
-    for i in range(env.n_agents):
-        # 为每个智能体设置目录
-        agent_dir = f"./models/agent{i}"
-        os.makedirs(agent_dir, exist_ok=True)
+    # 颜色代码
+    class Colors:
+        BLUE = '\033[94m'
+        GREEN = '\033[92m'
+        YELLOW = '\033[93m'
+        RED = '\033[91m'
+        PURPLE = '\033[95m'
+        CYAN = '\033[96m'
+        ENDC = '\033[0m'
+        BOLD = '\033[1m'
+        UNDERLINE = '\033[4m'
+
+    def print_colorful_slice(env, z, reward=None, action=None):
+        """打印单个Z层的彩色切片"""
+        print(f"{Colors.BOLD}{Colors.UNDERLINE}Z层 #{z}{Colors.ENDC}")
         
-        # 为每个智能体设置独特的种子
-        seed = args.seed + i if args.seed is not None else None
+        # 打印列标题
+        col_header = '   '
+        for col in range(env.n_cols):
+            col_header += f" {col:2} "
+        print(col_header)
         
-        # 创建NFSP智能体
-        agent = NFSPAgent(
-            player=env.players[i],
-            state_size=state_size,
-            action_size=action_size,
-            epsilon_init=0.4,                # 进一步增加初始探索率
-            epsilon_decay=30000,             # 进一步延长探索期
-            epsilon_min=0.05,                # 保持合理的最小探索率
-            update_freq=200,                 # 减少目标网络更新频率，使训练更稳定
-            sl_lr=0.0005,                    # 进一步降低监督学习率
-            rl_lr=0.0002,                    # 进一步降低强化学习率
-            sl_buffer_size=10000,            # 进一步扩大监督学习缓冲区
-            rl_buffer_size=20000,            # 进一步扩大强化学习缓冲区
-            rl_start=500,                    # 增加RL开始训练的样本数量
-            sl_start=500,                    # 增加SL开始训练的样本数量
-            train_freq=4,                    # 减少训练频率，允许更多探索
-            gamma=0.99,                      # 维持折扣因子
-            eta=0.2,                         # 增加平均策略比例，增强稳定性
-            rl_batch_size=128,               # 减少批量大小，防止过拟合
-            sl_batch_size=256,               # 减少批量大小，防止过拟合
-            hidden_units=256,                # 减小隐藏单元，简化模型
-            layers=args.layers,
-            device=args.device
-        )
-        nfsp_agents.append(agent)
+        # 打印分隔线
+        h_line = '  +'
+        for _ in range(env.n_cols):
+            h_line += '---+'
+        print(h_line)
+        
+        # 打印每一行
+        for row in range(env.n_rows):
+            row_str = f"{row:2}|"
+            for col in range(env.n_cols):
+                cell = ' '
+                
+                # 标记食物
+                for food in env.food_items:
+                    if not food.collected and food.position == (row, col, z):
+                        cell = f"{Colors.GREEN}F{food.level}{Colors.ENDC}"
+                
+                # 标记玩家
+                for i, player in enumerate(env.players):
+                    if player.position == (row, col, z):
+                        if cell != ' ':
+                            cell += f"{Colors.RED}P{i}{Colors.ENDC}"
+                        else:
+                            cell = f"{Colors.BLUE}P{i}{Colors.ENDC}"
+                
+                row_str += f" {cell:3}|"
+            
+            print(row_str)
+            print(h_line)
     
-    # 训练模式
-    if not args.test:
-        print("\n开始训练智能体...\n")
-        trained_agents = train_agents(
-            env, 
-            nfsp_agents, 
-            num_episodes=args.episodes, 
-            eval_interval=args.eval_interval,
-            render=args.render,
-            render_interval=args.render_interval
-        )
-        print("\n训练完成！\n")
-    # 测试模式
-    else:
-        # 使用utils中的test_agents函数进行测试
+    def print_3d_grid_state(env, rewards=None, actions=None):
+        """打印整个3D网格的所有切片"""
+        print("\n" + "="*50)
+        print(f"{Colors.BOLD}环境状态 | 步数: {env._current_steps}/{env._max_episode_steps}{Colors.ENDC}")
         
-        test_results = test_agents(
-            env,
-            nfsp_agents,
-            eval_episodes=args.eval_episodes,
-            eval_explo=args.eval_explo,
-            render=args.render,
-            num_demo_episodes=5
-        )
+        # 打印玩家状态
+        print(f"\n玩家状态:")
+        for i, player in enumerate(env.players):
+            print(f"  玩家 #{i}: 位置={player.position}, 等级={player.level}, 分数={player.score:.2f}")
+            if rewards is not None:
+                print(f"     奖励: {Colors.YELLOW}{rewards[i]:.3f}{Colors.ENDC}")
+            if actions is not None:
+                action_name = env.action_set.get(actions[i], "未知")
+                print(f"     动作: {Colors.CYAN}{action_name}{Colors.ENDC}")
         
-        # 打印测试结果摘要
-        if 'mean_reward' in test_results:
-            print(f"\n测试结果摘要:")
-            print(f"平均团队奖励: {test_results['mean_reward']:.4f}")
-            if 'exploitability' in test_results:
-                print(f"团队可利用度: {test_results['exploitability']:.4f}")
-            print("\n")
+        # 打印食物状态
+        print(f"\n食物状态:")
+        remaining_food = 0
+        for i, food in enumerate(env.food_items):
+            status = "可获取" if not food.collected else "已收集"
+            status_color = Colors.GREEN if not food.collected else Colors.RED
+            print(f"  食物 #{i}: 位置={food.position}, 等级={food.level}, 状态={status_color}{status}{Colors.ENDC}")
+            if not food.collected:
+                remaining_food += 1
+        
+        # 打印每个Z层的切片
+        print(f"\n网格表示 (剩余食物: {remaining_food}/{len(env.food_items)}):")
+        for z in range(env.n_depth):
+            print_colorful_slice(env, z, rewards, actions)
+        
+        print("="*50 + "\n")
+    
+    # 重置环境
+    obs = env.reset()
+
+    # 打印初始状态
+    print(f"\n{Colors.BOLD}{Colors.PURPLE}初始状态:{Colors.ENDC}")
+    print_3d_grid_state(env)
+    
+    # 循环执行随机动作
+    total_rewards = np.zeros(env.num_agents)
+    print(f"\n{Colors.BOLD}开始执行随机动作:{Colors.ENDC}")
+    
+    step_count = args.steps  # 使用命令行参数指定的步数
+    
+    for step in range(step_count):
+        print(f"\n{Colors.BOLD}{Colors.PURPLE}步骤 #{step+1}/{step_count}{Colors.ENDC}")
+        
+        # 为每个智能体选择随机动作
+        if args.manual:
+            # 手动输入动作
+            print(f"可用动作: {env.action_set}")
+            actions = []
+            for i in range(env.num_agents):
+                while True:
+                    try:
+                        action = int(input(f"为智能体 #{i} 输入动作 (0-6): "))
+                        if 0 <= action <= 6:
+                            break
+                        print("无效动作，请重新输入")
+                    except ValueError:
+                        print("请输入0-6之间的整数")
+                actions.append(action)
+        else:
+            # 随机选择动作
+            actions = [np.random.randint(0, 7) for _ in range(env.num_agents)]
+            
+        action_names = [env.action_set[a] for a in actions]
+        print(f"动作: {Colors.CYAN}{action_names}{Colors.ENDC}")
+
+        # 执行环境步进
+        obs, rewards, done, truncated, info = env.step(actions)
+        total_rewards += rewards
+
+        # 打印更新后的状态
+        print(f"\n{Colors.BOLD}更新后的状态:{Colors.ENDC}")
+        print_3d_grid_state(env, rewards, actions)
+        
+        # 打印奖励和总分
+        print(f"当前回合奖励: {Colors.YELLOW}{rewards}{Colors.ENDC}")
+        print(f"累计奖励总分: {Colors.YELLOW}{total_rewards}{Colors.ENDC}")
+        print(f"游戏是否结束: {Colors.RED if done else Colors.GREEN}{done}{Colors.ENDC}")
+        
+        # 等待时间
+        if args.delay > 0:
+            time.sleep(args.delay)
+        
+        # 如果游戏结束，打印结果和原因
+        if done:
+            print(f"\n{Colors.BOLD}{Colors.PURPLE}游戏结束!{Colors.ENDC}")
+            if all(food.collected for food in env.food_items):
+                print(f"{Colors.GREEN}原因: 所有食物已收集{Colors.ENDC}")
+            elif env._current_steps >= env._max_episode_steps:
+                print(f"{Colors.RED}原因: 达到最大步数 ({env._max_episode_steps}){Colors.ENDC}")
+            break
+
+    env.close()
+    print(f"\n{Colors.BOLD}{Colors.PURPLE}运行结束!{Colors.ENDC}")
+    
+    # 打印最终分数
+    print(f"\n{Colors.BOLD}最终分数:{Colors.ENDC}")
+    for i, player in enumerate(env.players):
+        print(f"  玩家 #{i}: {Colors.YELLOW}{player.score:.2f}{Colors.ENDC}")
+    print(f"  团队总分: {Colors.YELLOW}{sum(player.score for player in env.players):.2f}{Colors.ENDC}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="训练和测试NFSP智能体")
+    parser = argparse.ArgumentParser(description="运行3D Foraging环境并显示切片视图")
     
-    # 基本选项
-    parser.add_argument("--episodes", type=int, default=5000, help="训练回合数")
-    parser.add_argument("--render", action="store_true", help="启用环境渲染")
-    parser.add_argument("--render_interval", type=int, default=100, help="训练期间渲染的回合间隔")
-    parser.add_argument("--eval_interval", type=int, default=100, help="评估间隔（回合数）")
-    parser.add_argument("--test", action="store_true", help="测试模式：加载预训练模型")
-    parser.add_argument("--seed", type=int, default=None, help="随机种子")
-    parser.add_argument("--verbose", action="store_true", help="启用详细日志")
-    parser.add_argument("--eval_explo", action="store_true", help="评估团队可利用度")
-    parser.add_argument("--eval_episodes", type=int, default=100, help="评估回合数")
-    parser.add_argument("--device", type=str, default="cuda:0", help="设备类型")
-    parser.add_argument("--layers", type=int, default=5, help="神经网络层数")
+    # 环境参数
+    parser.add_argument("--rows", type=int, default=3, help="环境行数")
+    parser.add_argument("--cols", type=int, default=3, help="环境列数")
+    parser.add_argument("--depth", type=int, default=3, help="环境深度")
+    parser.add_argument("--agents", type=int, default=2, help="智能体数量")
+    parser.add_argument("--food", type=int, default=1, help="食物数量")
+    parser.add_argument("--sight", type=int, default=None, help="视野范围")
+    parser.add_argument("--max-player-level", type=int, default=1, help="最大玩家等级")
+    parser.add_argument("--min-player-level", type=int, default=1, help="最小玩家等级")
+    parser.add_argument("--max-food-level", type=int, default=2, help="最大食物等级")
+    parser.add_argument("--min-food-level", type=int, default=2, help="最小食物等级")
+    parser.add_argument("--force-coop", action="store_true", default=True, help="强制合作模式")
+    parser.add_argument("--max-steps", type=int, default=100, help="最大步数")
+    
+    # 运行参数
+    parser.add_argument("--steps", type=int, default=100, help="运行步数")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
+    parser.add_argument("--delay", type=float, default=0.2, help="每步之间的延迟时间")
+    parser.add_argument("--manual", action="store_true", help="手动输入动作")
+    
     args = parser.parse_args()
     main(args)
-

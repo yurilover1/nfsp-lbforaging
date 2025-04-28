@@ -6,80 +6,219 @@ import matplotlib.pyplot as plt
 import gymnasium as gym
 import logging
 from tqdm import tqdm
+import gym
+import numpy as np
+from lbforaging.foraging.environment_3d import ForagingEnv3D
+
 
 # 添加从nfsp_run.py移动的函数
 logger = logging.getLogger(__name__)
 
+
+def calculate_state_size(env_name, env_config=None):
+    # 如果提供了环境配置，使用它创建环境
+    if env_config:
+        if 'Foraging3D-v0' in env_name:
+            env = ForagingEnv3D(**env_config)
+        else:
+            env = gym.make(env_name, **env_config)
+    else:
+        env = gym.make(env_name)
+
+    try:
+        # 获取观测空间
+        if 'Foraging3D-v0' in env_name:
+            # 对于3D环境
+            obs = env.reset()[0]
+            if isinstance(obs, tuple):
+                # 如果返回的是元组，尝试获取第一个智能体的观测
+                obs = obs[0] if len(obs) > 0 else obs
+        else:
+            # 对于原始环境
+            reset_result = env.reset()
+            if isinstance(reset_result, tuple):
+                obs = reset_result[0]  # gym >= 0.26.0 返回 (obs, info)
+            else:
+                obs = reset_result  # 旧版本直接返回 obs
+
+        # 计算状态空间大小
+        if hasattr(obs, 'shape'):
+            # 对于numpy数组观测
+            state_size = np.prod(obs.shape)
+        elif isinstance(obs, tuple) and len(obs) == 2:
+            # 对于元组观测 (player_obs, food_obs)
+            state_size = np.prod(obs[0].shape) + np.prod(obs[1].shape)
+        else:
+            # 对于其他情况，尝试迭代观测
+            try:
+                state_size = sum(np.prod(o.shape) for o in obs)
+            except:
+                # 如果以上都失败，使用观测空间的形状
+                state_size = np.prod(env.observation_space.shape)
+
+        return int(state_size)
+
+    except Exception as e:
+        print(f"计算状态大小时出错: {e}")
+        # 如果出错，返回一个默认值
+        return 1372  # 这是您之前获得的状态空间大小
+
+    finally:
+        env.close()
+
+
 def calculate_state_size(env):
     """计算环境的状态大小"""
     try:
+        # 检查是否使用3D环境
+        is_3d_env = "ForagingEnv3D" in str(type(env.unwrapped))
+
         # 获取一个示例观测
-        obs, _ = env.reset()
-        
+        if hasattr(env, 'reset'):
+            obs, info = env.reset()
+            
+            # 如果环境使用grid_observation，从get_agent_obs方法获取更准确的观测
+            if is_3d_env and hasattr(env, 'grid_observation') and env.grid_observation:
+                agent_obs = env.get_agent_obs()
+                if agent_obs and isinstance(agent_obs, list) and len(agent_obs) > 0:
+                    obs = agent_obs[0]  # 使用第一个智能体的观测
+        else:
+            obs, info = None, None
+
+        # 如果无法获取观测，使用默认策略
+        if obs is None:
+            if is_3d_env:
+                # 检查环境尺寸
+                n_rows = getattr(env, 'n_rows', 4)
+                n_cols = getattr(env, 'n_cols', 4)
+                n_depth = getattr(env, 'n_depth', 4)
+                # 3D环境：假设是网格观测(4, n_rows, n_cols, n_depth)，4个通道
+                print(f"使用3D环境默认状态大小 (4,{n_rows},{n_cols},{n_depth})")
+                return 4 * n_rows * n_cols * n_depth  # 3D网格观测的默认大小
+            else:
+                # 2D环境默认状态大小
+                print("使用2D环境默认状态大小")
+                return 100
+
         # 如果观测是元组（多智能体环境），取第一个智能体的观测
         if isinstance(obs, tuple):
             first_obs = obs[0]
         else:
             first_obs = obs
-            
+
         # 检查观测形状以判断观测模式
         if isinstance(first_obs, np.ndarray):
+            # 检查是否为3D环境的网格观测
+            if is_3d_env and len(first_obs.shape) == 4:
+                # 例如 [4, rows, cols, depth] 形状
+                print(f"检测到3D网格观测模式: 形状={first_obs.shape}")
+                return first_obs.size  # 返回展平后的大小
+
             # 检查是否为三维数组
-            if len(first_obs.shape) == 3:
+            elif len(first_obs.shape) == 3:
                 # 检查是否为三层观测模式 [3, 5, 5]
                 if first_obs.shape[0] == 3 and first_obs.shape[1] == 5 and first_obs.shape[2] == 5:
                     print(f"检测到三层观测模式: 形状={first_obs.shape}")
                     return 3 * 5 * 5  # 返回展平后的大小
-                
+
                 # 检查是否为普通网格观测模式
                 print(f"检测到网格观测模式: 形状={first_obs.shape}")
                 return first_obs.size  # 返回展平后的大小
-            
+
             # 普通一维观测
             print(f"检测到普通观测模式: 形状={first_obs.shape}")
             return first_obs.size
-            
+
         # 尝试从环境获取observation_space
         if hasattr(env, 'observation_space'):
             # 尝试获取第一个观测空间的形状
-            obs_shape = env.observation_space[0].shape
+            if isinstance(env.observation_space, gym.spaces.Tuple):
+                obs_shape = env.observation_space[0].shape
+            else:
+                obs_shape = env.observation_space.shape
+
             print(f"从observation_space获取的形状: {obs_shape}")
-            
+
             # 如果是多维形状
             if isinstance(obs_shape, tuple) and len(obs_shape) > 1:
                 # 计算总大小
                 return np.prod(obs_shape)
             elif isinstance(obs_shape, tuple) and len(obs_shape) > 0:
                 return obs_shape[0]
-        
+
         # 默认状态大小
-        print("无法确定状态大小，使用默认值100")
-        return 100
-        
+        if is_3d_env:
+            print("无法确定3D环境的状态大小，使用默认值(864)")
+            return 864  # 4*6*6*6(默认3D网格观测大小)
+        else:
+            print("无法确定状态大小，使用默认值100")
+            return 100
+
     except Exception as e:
         print(f"计算状态大小时出错: {e}")
-        # 默认状态大小
-        return 100
+        import traceback
+        traceback.print_exc()
+        # 检查是否为3D环境
+        is_3d_env = "ForagingEnv3D" in str(type(env.unwrapped))
+        if is_3d_env:
+            # 3D环境默认状态大小
+            return 864  # 4*6*6*6(默认3D网格观测大小)
+        else:
+            # 默认状态大小
+            return 100
+
 
 def evaluate(env, agents, num_episodes=100, calculate_exploitability=False, eval_env=None):
     """
     评估智能体性能
-    
+
     参数:
         env: 游戏环境
         agents: 要评估的智能体列表
         num_episodes: 评估回合数
         calculate_exploitability: 是否计算可利用度
         eval_env: 用于评估的环境，如果为None，则使用原环境的副本
-    
+
     返回:
         如果calculate_exploitability为False，返回每个智能体的平均奖励；
         否则，返回(平均奖励，可利用度)元组
     """
     if eval_env is None:
-        # 创建一个新的环境用于评估
-        eval_env = gym.make(env.unwrapped.spec.id, render_mode=None)
-    
+        # 检查是否使用3D环境
+        is_3d_env = "ForagingEnv3D" in str(type(env))
+
+        if is_3d_env:
+            # 为3D环境创建新的评估环境实例
+            from lbforaging.foraging.environment_3d import ForagingEnv3D
+            eval_env = ForagingEnv3D(
+                n_rows=env.n_rows,
+                n_cols=env.n_cols,
+                n_depth=env.n_depth,
+                num_agents=env.num_agents,
+                num_food=env.num_food,
+                max_player_level=env.max_player_level,
+                min_player_level=env.min_player_level,
+                max_food_level=env.max_food_level,
+                min_food_level=env.min_food_level,
+                sight=10,  # 确保全局视野 - 设置为比环境尺寸更大的值
+                force_coop=env.force_coop,
+                grid_observation=hasattr(env, 'grid_observation') and env.grid_observation,
+                food_reward_scale=env.food_reward_scale,
+                step_reward_factor=env.step_reward_factor,
+                step_reward_threshold=env.step_reward_threshold
+            )
+        else:
+            # 创建一个新的标准环境用于评估
+            try:
+                # 尝试使用gym.make
+                import gymnasium as gym
+                eval_env = gym.make(env.unwrapped.spec.id, render_mode=None)
+            except (AttributeError, ImportError) as e:
+                print(f"无法使用gym.make创建环境：{e}")
+                # 作为后备选项，尝试复制环境
+                import copy
+                eval_env = copy.deepcopy(env)
+
     # 检查是否可以使用简化的评估方法
     if hasattr(eval_env, 'run'):
         # 使用环境的run方法执行评估
@@ -87,24 +226,101 @@ def evaluate(env, agents, num_episodes=100, calculate_exploitability=False, eval
         for _ in range(num_episodes):
             _, payoffs = eval_env.run(agents, is_training=False)
             total_rewards += payoffs
-            
+
         # 计算平均奖励
         avg_rewards = total_rewards / num_episodes
-        
+
         # 如果需要计算可利用度
         if calculate_exploitability and hasattr(agents[0], 'evaluate_team_exploitability'):
             # 使用第一个智能体的方法评估团队可利用度
-            exploitability, _ = agents[0].evaluate_team_exploitability(eval_env, agents, num_episodes=num_episodes//2)
+            exploitability, _ = agents[0].evaluate_team_exploitability(eval_env, agents, num_episodes=num_episodes // 2)
             return avg_rewards, exploitability
-        
-        return avg_rewards
-    
 
-def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=False, render_interval=100):
+        return avg_rewards
+    else:
+        # 环境不支持run方法，创建一个简单的评估循环
+        print("警告：环境不支持run方法，使用手动评估循环")
+        total_rewards = np.zeros(len(agents))
+
+        for _ in range(num_episodes):
+            # 重置环境
+            if hasattr(eval_env, 'reset'):
+                obs, _ = eval_env.reset()
+            else:
+                print("错误：环境没有reset方法")
+                return np.zeros(len(agents))
+
+            done = False
+            episode_rewards = np.zeros(len(agents))
+
+            while not done:
+                # 收集动作
+                actions = []
+                for i, agent in enumerate(agents):
+                    if hasattr(agent, 'step'):
+                        action = agent.step(obs[i] if isinstance(obs, tuple) else obs)
+                    else:
+                        print(f"错误：智能体{i}没有step方法")
+                        action = 0  # 使用默认动作
+                    actions.append(action)
+
+                # 执行动作
+                if hasattr(eval_env, 'step'):
+                    obs, rewards, done, _, _ = eval_env.step(actions)
+                    episode_rewards += rewards
+                else:
+                    print("错误：环境没有step方法")
+                    break
+
+            total_rewards += episode_rewards
+
+        avg_rewards = total_rewards / num_episodes
+
+        # 计算可利用度（如果需要）
+        if calculate_exploitability and hasattr(agents[0], 'evaluate_team_exploitability'):
+            exploitability, _ = agents[0].evaluate_team_exploitability(eval_env, agents, num_episodes=num_episodes // 2)
+            return avg_rewards, exploitability
+
+        return avg_rewards
+
+
+
+
+def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=False, render_interval=100, render_mode='human'):
     """训练NFSP智能体"""
-    # 用于评估的环境，传递与主环境相同的渲染模式
-    eval_env = gym.make("Foraging-6x6-2p-3f-v3", sight=3, 
-                   grid_observation=False,  three_layer_obs=True, render_mode=None)
+    # 检查是否使用3D环境
+    is_3d_env = "ForagingEnv3D" in str(type(env))
+
+    # 用于评估的环境
+    if is_3d_env:
+        # 为3D环境创建新的评估环境实例
+        from lbforaging.foraging.environment_3d import ForagingEnv3D
+        eval_env = ForagingEnv3D(
+            n_rows=env.n_rows,
+            n_cols=env.n_cols,
+            n_depth=env.n_depth,
+            num_agents=env.num_agents,
+            num_food=env.num_food,
+            max_player_level=env.max_player_level,
+            min_player_level=env.min_player_level,
+            max_food_level=env.max_food_level,
+            min_food_level=env.min_food_level,
+            sight=10,  # 确保全局视野 - 设置为比环境尺寸更大的值
+            force_coop=env.force_coop,
+            grid_observation=hasattr(env, 'grid_observation') and env.grid_observation,
+            food_reward_scale=env.food_reward_scale,
+            step_reward_factor=env.step_reward_factor,
+            step_reward_threshold=env.step_reward_threshold
+        )
+    else:
+        try:
+            # 尝试使用gym.make
+            import gymnasium as gym
+            eval_env = gym.make("Foraging-6x6-2p-3f-v3", sight=3,
+                                grid_observation=False, three_layer_obs=True, render_mode=None)
+        except Exception as e:
+            print(f"无法创建评估环境：{e}")
+            eval_env = env  # 使用原始环境作为后备选项
     
     # 训练历史记录
     history = {
@@ -161,7 +377,8 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
                         nfsp_agents,
                         is_training=True,
                         render=True, 
-                        sleep_time=0.5
+                        sleep_time=0.5,
+                        render_mode=render_mode  # 添加渲染模式参数
                     )
                     # 暂停进度条更新
                     pbar.clear()
@@ -193,23 +410,19 @@ def train_agents(env, nfsp_agents, num_episodes=5000, eval_interval=100, render=
                 pbar.update(1)
                 
                 # 存储轨迹并训练
-                for j in range(env.n_agents):
+                for j in range(env.num_agents):
                     for ts in trajectories[j]:
                         if len(ts) > 0:
                             # ts结构：[obs_dict, action, reward, next_obs_dict, done]
-                            # 首先获取预处理后的状态
-                            obs = nfsp_agents[j]._preprocess_state(ts[0])
+                            # 直接将整个观察字典传递给_preprocess_state方法，不需要提前预处理
+                            obs_dict = ts[0]
                             action = ts[1]
                             reward = ts[2]
-                            next_obs = None if ts[4] else nfsp_agents[j]._preprocess_state(ts[3])
+                            next_obs_dict = ts[3]
                             done = ts[4]
                             
-                            # 如果是终止状态，则使用当前状态作为下一状态
-                            if next_obs is None:
-                                next_obs = obs
-                            
-                            # 直接添加轨迹，_preprocess_state中会处理数据格式转换
-                            nfsp_agents[j].add_traj([obs, action, reward, next_obs, done])
+                            # 直接添加轨迹，让_preprocess_state在内部处理数据格式转换
+                            nfsp_agents[j].add_traj([obs_dict, action, reward, next_obs_dict, done])
                     nfsp_agents[j].train()
                 
                 # 每10个回合保存损失和准确率
@@ -509,117 +722,109 @@ def save_history(history, nfsp_agents):
         import traceback
         traceback.print_exc()
 
-def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=True, num_demo_episodes=5):
+
+def test_agents(env, nfsp_agents, eval_episodes=100, eval_explo=False, render=True, num_demo_episodes=5, render_mode='human', sleep_time=0.5):
     """
     测试NFSP智能体性能
     
     参数:
-        env: 游戏环境
-        nfsp_agents: 要测试的NFSP智能体列表
+        env: 环境
+        nfsp_agents: NFSP智能体列表
         eval_episodes: 评估回合数
-        eval_explo: 是否评估团队可利用度
-        render: 是否渲染演示回合
-        num_demo_episodes: 演示回合数量
+        eval_explo: 是否评估可利用性
+        render: 是否渲染
+        num_demo_episodes: 渲染的回合数
+        render_mode: 渲染模式
+        sleep_time: 渲染时每步之间的延迟时间(秒)
         
     返回:
-        测试结果字典，包含平均奖励、智能体奖励和可利用度（如果计算）
+        测试结果字典
     """
-    print("\n测试模式 - 加载预训练模型并展示性能...\n")
+    print(f"\n开始测试智能体性能 (总共 {eval_episodes} 回合)...")
     
-    # 加载预训练模型
-    loaded_models = []
+    # 为评估设置智能体策略模式
     for agent in nfsp_agents:
-        if agent.load_models():
-            loaded_models.append("成功")
-        else:
-            loaded_models.append("失败")
+        agent.policy_mode = agent.eval_mode  # 使用评估模式('average' 或 'best')
     
-    print(f"模型加载状态: {loaded_models}")
+    # 测试部分
     
-    results = {}
-    
-    # 如果指定了评估可利用度
-    if eval_explo:
-        print("\n评估团队可利用度...\n")
-        
-        # 创建评估环境
-        eval_env = gym.make(env.unwrapped.spec.id, render_mode=None)
-        
-        # 评估团队可利用度
-        rewards, exploitability = evaluate(
-            env, 
-            nfsp_agents, 
-            num_episodes=eval_episodes, 
-            calculate_exploitability=True,
-            eval_env=eval_env
-        )
-        
-        print(f"\n团队平均奖励: {np.mean(rewards):.4f}")
-        print(f"各智能体奖励: {rewards}")
-        print(f"团队可利用度: {exploitability:.4f}")
-        print("\n注: 可利用度越低表示策略越接近最优协作策略\n")
-        
-        # 保存评估结果
-        results_dir = "./results"
-        os.makedirs(results_dir, exist_ok=True)
-        np.savez(
-            f"{results_dir}/exploitability_eval.npz",
-            rewards=rewards,
-            exploitability=exploitability
-        )
-        
-        print(f"评估结果已保存到 {results_dir}/exploitability_eval.npz")
-        
-        # 保存结果
-        results = {
-            'rewards': rewards,
-            'mean_reward': np.mean(rewards),
-            'exploitability': exploitability
-        }
-    
-    # 如果需要渲染演示回合
+    # 评估智能体性能
     if render and num_demo_episodes > 0:
-        # 展示演示回合
-        print(f"\n展示{num_demo_episodes}个回合的表现:\n")
-        demo_rewards = []
-        coop_metrics = []
+        print(f"\n运行 {num_demo_episodes} 个渲染回合...")
         
-        for episode in range(num_demo_episodes):
-            print(f"回合 {episode + 1}...")
-            
-            # 为每个回合创建新的环境实例
-            test_env = gym.make(env.unwrapped.spec.id, render_mode="human")
-            
-            # 为新环境设置智能体控制器
-            for i, agent in enumerate(nfsp_agents):
-                if i < len(test_env.players):
-                    test_env.players[i].set_controller(agent)
-            
-            # 运行一个回合并渲染
-            _, rewards, info = test_env.run(None, is_training=False, render=True, sleep_time=0.5)
-            demo_rewards.append(rewards)
-            
-            # 收集合作指标
-            if info:
-                coop_metrics.append(info)
-                
-                # 打印回合合作指标
-                print(f"回合 {episode + 1} 奖励: {rewards}")
-                if 'coop_food_count' in info:
-                    print(f"需要合作食物: {info['coop_food_count']:.1f}, 玩家聚集组数: {info['player_clusters']:.1f}")
-                if 'avg_cluster_size' in info and info['avg_cluster_size'] > 0:
-                    print(f"平均组大小: {info['avg_cluster_size']:.2f}")
-            else:
-                print(f"回合 {episode + 1} 奖励: {rewards}")
-            
-            # 关闭环境
-            test_env.close()
-            time.sleep(1.0)  # 在回合之间暂停
+        # 渲染演示回合
+        total_rewards = np.zeros(env.num_agents)  # 使用num_agents而不是n_agents
         
-        print("\n演示完成！\n")
-        
-        # 将演示回合的奖励和合作指标添加到结果中
-        results['demo_rewards'] = demo_rewards
-        results['demo_coop_metrics'] = coop_metrics
+        for i in range(num_demo_episodes):
+            print(f"\n渲染回合 {i+1}/{num_demo_episodes}...")
+            # 执行演示回合，并渲染
+            _, episode_rewards = env.run(
+                nfsp_agents, 
+                is_training=False, 
+                render=True, 
+                sleep_time=sleep_time,
+                render_mode=render_mode
+            )
+            print(f"回合 {i+1} 奖励: {episode_rewards}")
+            total_rewards += episode_rewards
+            
+        # 计算平均奖励
+        avg_demo_rewards = total_rewards / num_demo_episodes
+        print(f"\n演示回合平均奖励: {avg_demo_rewards}")
     
-    return results
+    # 更多评估（统计全部评估回合）
+    remaining_episodes = eval_episodes - (num_demo_episodes if render else 0)
+    
+    if remaining_episodes > 0:
+        print(f"\n运行 {remaining_episodes} 个评估回合...")
+        
+        # 不渲染的评估回合
+        total_rewards = np.zeros(env.num_agents)
+        
+        for i in range(remaining_episodes):
+            # 执行评估回合，不渲染
+            _, episode_rewards = env.run(
+                nfsp_agents, 
+                is_training=False, 
+                render=False
+            )
+            total_rewards += episode_rewards
+            
+        # 计算平均奖励
+        avg_eval_rewards = total_rewards / remaining_episodes
+        print(f"\n评估回合平均奖励: {avg_eval_rewards}")
+    
+    # 合并所有回合的奖励统计
+    if num_demo_episodes > 0 and render and remaining_episodes > 0:
+        # 如果同时有演示和评估回合
+        total_episodes = num_demo_episodes + remaining_episodes
+        combined_rewards = (avg_demo_rewards * num_demo_episodes + 
+                          avg_eval_rewards * remaining_episodes) / total_episodes
+        agent_rewards = combined_rewards
+    elif num_demo_episodes > 0 and render:
+        # 只有演示回合
+        agent_rewards = avg_demo_rewards
+    else:
+        # 只有评估回合
+        agent_rewards = avg_eval_rewards
+    
+    team_reward = np.sum(agent_rewards)
+    print(f"\n整体评估结果:")
+    print(f"团队总奖励: {team_reward:.4f}")
+    print(f"每个智能体奖励: {agent_rewards}")
+    
+    # 如果需要评估可利用性
+    exploitability = 0.0
+    if eval_explo and hasattr(nfsp_agents[0], 'evaluate_team_exploitability'):
+        try:
+            exploitability, _ = nfsp_agents[0].evaluate_team_exploitability(env, nfsp_agents, num_episodes=50)
+            print(f"团队可利用性: {exploitability:.4f}")
+        except Exception as e:
+            print(f"评估可利用性时出错: {e}")
+    
+    # 返回测试结果
+    return {
+        'mean_reward': team_reward,
+        'agent_rewards': agent_rewards,
+        'exploitability': exploitability if eval_explo else None
+    }

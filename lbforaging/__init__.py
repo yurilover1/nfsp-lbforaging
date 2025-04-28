@@ -31,7 +31,7 @@ for s, p, f, mfl, c, po, pen in product(
     
     register(
         id=env_id,
-        entry_point="lbforaging.foraging:ForagingEnv",
+        entry_point="lbforaging.foraging:ForagingEnv3D",
         kwargs={
             "players": p,
             "min_player_level": 1,
@@ -41,7 +41,7 @@ for s, p, f, mfl, c, po, pen in product(
             "max_food_level": mfl,
             "max_num_food": f,
             "sight": 2 if po else s,
-            "max_episode_steps": 50,
+            "max_episode_steps": 100,
             "force_coop": c,
             "grid_observation": False,  # 使用网格观测模式
             "penalty": 0.1 if pen else 0.0,
@@ -71,7 +71,7 @@ def register_grid_envs():
                     "max_food_level": mfl,
                     "max_num_food": f,
                     "sight": sight,
-                    "max_episode_steps": 50,
+                    "max_episode_steps": 100,
                     "force_coop": c,
                     "grid_observation": False,  # 设置为False，使用三层观测模式
                     "three_layer_obs": False,  # 明确启用三层观测模式

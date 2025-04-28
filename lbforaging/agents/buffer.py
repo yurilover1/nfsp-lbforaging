@@ -13,20 +13,139 @@ class replay_buffer:
     
     def store(self, state, action, reward, next_state, done):
         """存储经验到缓冲区"""
+        # 处理状态数据
+        if isinstance(state, dict):
+            if 'obs' in state:
+                state = state['obs']
+            elif 'grid' in state:
+                state = state['grid']
+            else:
+                # 如果字典中没有obs或grid，尝试提取所有数值
+                state_values = []
+                for key, value in state.items():
+                    if isinstance(value, (int, float, np.ndarray)):
+                        if isinstance(value, np.ndarray):
+                            state_values.extend(value.flatten())
+                        else:
+                            state_values.append(value)
+                if state_values:
+                    state = np.array(state_values, dtype=np.float32)
+                else:
+                    state = np.zeros(864, dtype=np.float32)  # 使用默认状态
+                    
+        # 处理下一状态数据
+        if isinstance(next_state, dict):
+            if 'obs' in next_state:
+                next_state = next_state['obs']
+            elif 'grid' in next_state:
+                next_state = next_state['grid']
+            else:
+                # 如果字典中没有obs或grid，尝试提取所有数值
+                state_values = []
+                for key, value in next_state.items():
+                    if isinstance(value, (int, float, np.ndarray)):
+                        if isinstance(value, np.ndarray):
+                            state_values.extend(value.flatten())
+                        else:
+                            state_values.append(value)
+                if state_values:
+                    next_state = np.array(state_values, dtype=np.float32)
+                else:
+                    next_state = np.zeros(864, dtype=np.float32)  # 使用默认状态
+        
+        # 确保状态是一维数组
+        if isinstance(state, np.ndarray):
+            state = state.flatten()
+        if isinstance(next_state, np.ndarray):
+            next_state = next_state.flatten()
+            
+        # 存储处理后的数据
         self.buffer.append((state, action, reward, next_state, done))
     
     def sample(self, batch_size):
-        """从缓冲区随机采样一批经验"""
-        # 确保有足够的样本
-        batch_size = min(batch_size, len(self.buffer))
+        """从经验池中采样一个批次的数据"""
+        if len(self.buffer) < batch_size:
+            # 如果经验池中的数据不足一个批次，返回None
+            return None
+            
+        # 随机采样索引
+        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
         
-        # 随机采样
-        batch = random.sample(self.buffer, batch_size)
+        # 初始化批次数据
+        states = []
+        actions = []
+        rewards = []
+        next_states = []
+        dones = []
         
-        # 分解批次
-        states, actions, rewards, next_states, dones = zip(*batch)
-        
-        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones)
+        # 收集批次数据
+        for idx in indices:
+            state, action, reward, next_state, done = self.buffer[idx]
+            
+            # 处理状态数据
+            if isinstance(state, dict):
+                if 'obs' in state:
+                    state = state['obs']
+                elif 'grid' in state:
+                    state = state['grid']
+                else:
+                    # 如果字典中没有obs或grid，尝试提取所有数值
+                    state_values = []
+                    for key, value in state.items():
+                        if isinstance(value, (int, float, np.ndarray)):
+                            if isinstance(value, np.ndarray):
+                                state_values.extend(value.flatten())
+                            else:
+                                state_values.append(value)
+                    if state_values:
+                        state = np.array(state_values, dtype=np.float32)
+                    else:
+                        state = np.zeros(864, dtype=np.float32)  # 使用默认状态
+                        
+            if isinstance(next_state, dict):
+                if 'obs' in next_state:
+                    next_state = next_state['obs']
+                elif 'grid' in next_state:
+                    next_state = next_state['grid']
+                else:
+                    # 如果字典中没有obs或grid，尝试提取所有数值
+                    state_values = []
+                    for key, value in next_state.items():
+                        if isinstance(value, (int, float, np.ndarray)):
+                            if isinstance(value, np.ndarray):
+                                state_values.extend(value.flatten())
+                            else:
+                                state_values.append(value)
+                    if state_values:
+                        next_state = np.array(state_values, dtype=np.float32)
+                    else:
+                        next_state = np.zeros(864, dtype=np.float32)  # 使用默认状态
+            
+            # 确保状态是一维数组
+            if isinstance(state, np.ndarray):
+                state = state.flatten()
+            if isinstance(next_state, np.ndarray):
+                next_state = next_state.flatten()
+                
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+            next_states.append(next_state)
+            dones.append(done)
+            
+        # 转换为numpy数组
+        try:
+            states = np.array(states, dtype=np.float32)
+            actions = np.array(actions)
+            rewards = np.array(rewards, dtype=np.float32)
+            next_states = np.array(next_states, dtype=np.float32)
+            dones = np.array(dones, dtype=np.float32)
+        except Exception as e:
+            print(f"转换批次数据时出错: {e}")
+            print("状态形状:", [s.shape if isinstance(s, np.ndarray) else type(s) for s in states])
+            return None
+            
+        return states, actions, rewards, next_states, dones
     
     def __len__(self):
         """返回缓冲区当前大小"""

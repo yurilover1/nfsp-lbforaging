@@ -1,51 +1,48 @@
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import math
 import random
-import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import os
 from lbforaging.agents import BaseAgent
-from .model import dueling_ddqn, policy
-from .buffer import reservoir_buffer, n_step_replay_buffer, replay_buffer
+from .buffer import reservoir_buffer, replay_buffer
 from .utils import action_mask
+import torch.optim as optim
+from models.networks import DenseNet
 
 
 class NFSPAgent(BaseAgent):
-    def __init__(self, 
-                player,
-                state_size,
-                action_size, 
-                epsilon_init=0.06,
-                epsilon_decay=10000,
-                epsilon_min=0.0,
-                update_freq=100,
-                sl_lr=0.005,
-                rl_lr=0.001,
-                sl_buffer_size=10000,
-                rl_buffer_size=10000,
-                n_step=1,
-                gamma=0.99,
-                eta=0.1,
-                rl_start=300,
-                sl_start=300,
-                train_freq=1,
-                rl_batch_size=64,
-                sl_batch_size=64,
-                device=None,
-                hidden_units=64,
-                layers=3,
-                eval_mode='average'):
-        
+    def __init__(self,
+                 player,
+                 state_size,
+                 action_size,
+                 epsilon_init=0.4,
+                 epsilon_decay=30000,
+                 epsilon_min=0.05,
+                 update_freq=200,
+                 sl_lr=0.0005,
+                 rl_lr=0.0002,
+                 sl_buffer_size=10000,
+                 rl_buffer_size=20000,
+                 rl_start=500,
+                 sl_start=500,
+                 train_freq=4,
+                 gamma=0.99,
+                 eta=0.2,
+                 rl_batch_size=128,
+                 sl_batch_size=256,
+                 hidden_units=256,
+                 layers=5,
+                 device="cpu:0",
+                 eval_mode='average'):
+
         super().__init__(player)
         self.name = f"NFSP Agent {player.level if hasattr(player, 'level') else ''}"
-        
+
         # 基本参数
         self.state_size = state_size
-        self.action_size = action_size
-        self.n_step = n_step
+        self.action_size = action_size  # 可能是5(2D)或7(3D)
+        self.n_step = 1
         self.gamma = gamma
         self.eta = eta  # 决定使用哪种策略的概率
         self.rl_batch_size = rl_batch_size
@@ -59,7 +56,7 @@ class NFSPAgent(BaseAgent):
         self.rl_lr = rl_lr
         self.sl_lr = sl_lr
         # 设备设置
-        self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = device
         # 初始化网络
         self.hidden_units = hidden_units
         self.networks_initialized = False
@@ -67,92 +64,76 @@ class NFSPAgent(BaseAgent):
         # 记录是否已经进行了状态尺寸检查 - 优化性能，避免重复检查
         self.state_size_checked = False
         # 初始化经验回放缓冲区
-        if self.n_step > 1:
-            self.rl_buffer = n_step_replay_buffer(rl_buffer_size, self.n_step, self.gamma)
-        else:
-            self.rl_buffer = replay_buffer(rl_buffer_size)
+        self.rl_buffer = replay_buffer(rl_buffer_size)
         self.sl_buffer = reservoir_buffer(sl_buffer_size)
         # epsilon策略
         self.epsilon_init = epsilon_init
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
-        self.epsilon = lambda x: self.epsilon_min + (self.epsilon_init - self.epsilon_min) * math.exp(-1. * x / self.epsilon_decay)
-        
+        self.epsilon = lambda x: self.epsilon_min + (self.epsilon_init - self.epsilon_min) * math.exp(
+            -1. * x / self.epsilon_decay)
+
         # 训练计数
         self.count = 0
-        
+
         # 策略模式 (平均策略 或 最优策略)
         self.policy_mode = None
         self.choose_policy_mode()
-        
+
         # 损失记录
         self.losses = []  # SL损失
         self.RLlosses = []  # RL损失
         self.policy_accuracies = []  # 策略准确度记录
- 
+
         # 设置matplotlib支持中文
         rcParams['font.family'] = ['Microsoft YaHei']
-        
+
         # 避免使用原始类中的use_raw属性
         self.use_raw = False
-    
-    def _init_networks(self, obs_sample):
-        """
-        初始化NFSP所需的所有神经网络
-        为RL和SL策略设置不同的网络架构
-        """
-        # 预处理观察样本获取状态表示
-        try:
-            state = self._preprocess_state(obs_sample)
-            if hasattr(state, 'shape') and len(state.shape) > 0:
-                self.state_size = state.shape[0]
-            else:
-                # 直接预处理整个观察
-                state = self._preprocess_state(obs_sample)
-                self.state_size = len(state) if hasattr(state, '__len__') else 100
-            
-        except Exception as e:
-            print(f"处理状态时出错: {e}")
-            # 设置默认状态大小
-            self.state_size = 100
-            
-        # 确保状态大小为正整数
-        if not self.state_size or self.state_size <= 0:
-            print("警告: 检测到无效的状态大小，使用默认值")
-            self.state_size = 100  # 默认大小
-        
-        # 固定动作大小为环境中的动作数
-        self.action_size = 6
 
-        self.rl_eval_network = dueling_ddqn(self.state_size, self.action_size, 
-                                hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
+        # 初始化网络
+        self._initialize_networks()
+
+    def _initialize_networks(self):
+        """初始化所有网络"""
+        # 创建策略网络
+        self.policy_network = DenseNet(
+            input_size=self.state_size,
+            output_size=self.action_size,
+            hidden_units=self.hidden_units,
+            num_layers=self.layers
+        ).to(self.device)
         
-        self.rl_target_network = dueling_ddqn(self.state_size, self.action_size, 
-                                hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
+        # 创建Q网络
+        self.rl_eval_network = DenseNet(
+            input_size=self.state_size,
+            output_size=self.action_size,
+            hidden_units=self.hidden_units,
+            num_layers=self.layers
+        ).to(self.device)
         
+        self.rl_target_network = DenseNet(
+            input_size=self.state_size,
+            output_size=self.action_size,
+            hidden_units=self.hidden_units,
+            num_layers=self.layers
+        ).to(self.device)
+        
+        # 复制eval网络参数到target网络
         self.rl_target_network.load_state_dict(self.rl_eval_network.state_dict())
         
-        # 为RL网络设置优化器
-        self.rl_optimizer = torch.optim.Adam(self.rl_eval_network.parameters(), lr=self.rl_lr)
+        # 创建优化器
+        self.policy_optimizer = optim.Adam(self.policy_network.parameters(), lr=self.sl_lr)
+        self.rl_optimizer = optim.Adam(self.rl_eval_network.parameters(), lr=self.rl_lr)
         
-        # 初始化监督学习策略网络
-        self.sl_policy = policy(self.state_size, self.action_size,
-                                    hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
-        
-        # 为SL网络设置优化器
-        self.sl_optimizer = torch.optim.Adam(self.sl_policy.parameters(), lr=self.sl_lr)
-        
-        # 初始化平均策略和最佳响应
-        self.avg_policy = AveragePolicy(self)
-        self.best_response = RandomBestResponse(self.rl_eval_network)
-        
+        # 标记网络已初始化
         self.networks_initialized = True
-       
+
     def _ensure_network_compatibility(self, state):
         """确保网络与输入状态大小兼容"""
         # 如果网络尚未初始化，初始化它
         if not self.networks_initialized:
-            self._init_networks({'obs': state})
+            self._initialize_networks()
             self.state_size_checked = True  # 标记已检查状态尺寸
             return True
             
@@ -161,7 +142,27 @@ class NFSPAgent(BaseAgent):
             return False
             
         # 首次检查状态大小是否与当前网络匹配
-        state_size = state.shape[0]
+        if isinstance(state, dict):
+            if 'obs' in state:
+                state_size = state['obs'].shape[0]
+            elif 'grid' in state:
+                state_size = state['grid'].shape[0]
+            else:
+                # 如果字典中没有obs或grid，尝试提取所有数值
+                state_values = []
+                for key, value in state.items():
+                    if isinstance(value, (int, float, np.ndarray)):
+                        if isinstance(value, np.ndarray):
+                            state_values.extend(value.flatten())
+                        else:
+                            state_values.append(value)
+                if state_values:
+                    state_size = len(state_values)
+                else:
+                    state_size = 864  # 使用默认状态大小
+        else:
+            state_size = state.shape[0]
+            
         if state_size != self.state_size:
             print(f"检测到状态大小变化: 当前={state_size}, 网络期望={self.state_size}")
             print("重新构建网络以匹配新的状态大小...")
@@ -176,7 +177,7 @@ class NFSPAgent(BaseAgent):
             
             # 重新初始化网络
             self.networks_initialized = False
-            self._init_networks({'obs': state})
+            self._initialize_networks()
             
             # 恢复旧的训练指标
             self.losses = old_losses
@@ -192,95 +193,79 @@ class NFSPAgent(BaseAgent):
     def choose_policy_mode(self):
         """选择策略模式，以eta概率使用平均策略，否则使用最优策略"""
         self.policy_mode = 'average' if random.random() < self.eta else 'best'
-    
+
     def _preprocess_state(self, obs):
-        """
-        预处理观察到的状态
-        处理三种类型的观察:
-        1. 三层观测模式 - 包含3个通道的5x5数组:
-           - 通道0: 当前智能体层
-           - 通道1: 友方智能体层
-           - 通道2: 食物层
-        2. 网格观察模式 - 包含4个通道的数组:
-           - 通道0: 智能体层，显示所有智能体的位置和等级
-           - 通道1: 食物层，显示所有食物的位置和等级
-           - 通道2: 可访问层，显示哪些位置可访问
-           - 通道3: 自身标识层，标识自己的位置
-        3. 标准观察模式 - 包含field和players信息的结构化数据
-        """
-        # 如果已经是numpy数组，可能是预处理过的状态
-        if isinstance(obs, np.ndarray):
-            # 首先检查是否是三层观测格式 [3,5,5]
-            if len(obs.shape) == 3 and obs.shape[0] == 3 and obs.shape[1] == 5 and obs.shape[2] == 5:
-                # 直接按权重叠加三层观测
-                # 自身层乘以1，友方层乘以2，食物层乘以3
-                merged_layer = obs[0] * 1 + obs[1] * 2 + obs[2] * 3
-                return merged_layer.reshape(-1).astype(np.float32)
-            # 检查是否是标准网格观测格式
-            elif len(obs.shape) == 3:
-                # 展平多维数组
-                return obs.reshape(-1).astype(np.float32)
-            # 确保是一维数组
-            elif len(obs.shape) == 1:
-                return obs.astype(np.float32)
+        """预处理观察为状态向量"""
+        try:
+            # 如果obs是字典类型
+            if isinstance(obs, dict):
+                if 'obs' in obs and not isinstance(obs['obs'], dict):
+                    # 如果obs['obs']是numpy数组或其他非字典类型
+                    obs = obs['obs']
+                elif 'grid' in obs and not isinstance(obs['grid'], dict):
+                    # 如果obs['grid']是numpy数组或其他非字典类型
+                    obs = obs['grid']
+                else:
+                    # 如果字典中没有obs或grid，或者它们是嵌套字典，尝试提取所有数值
+                    state_values = []
+                    for key, value in obs.items():
+                        if key == 'actions':  # 跳过actions键
+                            continue
+                        if isinstance(value, (int, float, np.ndarray)):
+                            if isinstance(value, np.ndarray):
+                                state_values.extend(value.flatten())
+                            else:
+                                state_values.append(value)
+                    if state_values:
+                        return np.array(state_values, dtype=np.float32)
+                    else:
+                        # 如果无法从字典中提取有用值，返回默认状态
+                        is_3d_env = hasattr(self.player, 'position') and len(self.player.position) == 3
+                        default_size = 864 if is_3d_env else 100  # 默认状态大小
+                        print("警告: 无法从字典中提取有用数据，使用默认状态")
+                        return np.zeros(default_size, dtype=np.float32)
+                    
+            # 如果obs是元组类型(player_obs, food_obs)
+            if isinstance(obs, tuple):
+                player_obs, food_obs = obs
+                # 确保两个观察都是numpy数组
+                if not isinstance(player_obs, np.ndarray):
+                    player_obs = np.array(player_obs, dtype=np.float32)
+                if not isinstance(food_obs, np.ndarray):
+                    food_obs = np.array(food_obs, dtype=np.float32)
+                    
+                # 确保两个观察都是一维的
+                if len(player_obs.shape) > 1:
+                    player_obs = player_obs.flatten()
+                if len(food_obs.shape) > 1:
+                    food_obs = food_obs.flatten()
+                    
+                # 如果food_obs是空的，用0填充
+                if food_obs.size == 0:
+                    food_obs = np.zeros(player_obs.shape[0], dtype=np.float32)
+                    
+                # 连接两个观察
+                state = np.concatenate([player_obs, food_obs])
+                
+            # 如果obs是numpy数组(grid observation)
+            elif isinstance(obs, np.ndarray):
+                state = obs.flatten()
             else:
-                # 展平任何其他维度的数组
-                return obs.reshape(-1).astype(np.float32)
-        
-        # 如果是字典格式，提取'obs'键
-        if isinstance(obs, dict) and 'obs' in obs:
-            raw_obs = obs['obs']
-            # 递归处理提取的观察
-            return self._preprocess_state(raw_obs)
-        
-        # 尝试获取可能的属性
-        state_vector = []
-        
-        # 尝试提取field属性
-        if hasattr(obs, 'field'):
-            try:
-                field = obs.field
-                # 确保field是数组类型并可以展平
-                if hasattr(field, 'flatten'):
-                    state_vector.extend(field.flatten())
-            except Exception as e:
-                print(f"处理field时出错: {e}")
-        
-        # 尝试提取players属性
-        if hasattr(obs, 'players') and hasattr(obs.players, '__iter__'):
-            try:
-                for player in obs.players:
-                    # 尝试提取玩家位置
-                    if hasattr(player, 'position'):
-                        state_vector.extend(player.position)
-                    # 尝试提取玩家等级
-                    if hasattr(player, 'level'):
-                        state_vector.append(player.level)
-                    # 检查是否是自己
-                    is_self = 1.0 if hasattr(player, 'is_self') and player.is_self else 0.0
-                    state_vector.append(is_self)
-            except Exception as e:
-                print(f"处理players时出错: {e}")
-        
-        # 如果提取到了属性，返回状态向量
-        if state_vector:
-            return np.array(state_vector, dtype=np.float32)
-        
-        # 如果没有提取到任何信息，可能是自定义格式，尝试直接使用
-        if hasattr(obs, 'shape'):
-            # 可能是形状多维的张量，展平
-            return np.array(obs).reshape(-1).astype(np.float32)
-        
-        # 如果是其他可迭代对象，尝试转换为numpy数组
-        if hasattr(obs, '__iter__'):
-            try:
-                return np.array(list(obs), dtype=np.float32)
-            except Exception as e:
-                print(f"转换观察为数组时出错: {e}")
-        
-        # 最后的后备方案：创建一个默认状态
-        print("警告: 无法处理观察，使用默认状态")
-        return np.zeros(100, dtype=np.float32)
+                print(f"警告: 无法处理观察类型 {type(obs)}")
+                # 返回默认状态
+                is_3d_env = hasattr(self.player, 'position') and len(self.player.position) == 3
+                default_size = 864 if is_3d_env else 100
+                return np.zeros(default_size, dtype=np.float32)
+                
+            return state.astype(np.float32)
+            
+        except Exception as e:
+            print(f"转换观察为数组时出错: {e}")
+            print("警告: 无法处理观察，使用默认状态")
+            # 返回默认状态
+            is_3d_env = hasattr(self.player, 'position') and len(self.player.position) == 3
+            default_size = 864 if is_3d_env else 100
+            return np.zeros(default_size, dtype=np.float32)
     
     def rl_train(self):
         """训练Q网络 (RL)"""
@@ -331,7 +316,7 @@ class NFSPAgent(BaseAgent):
         action = torch.LongTensor(action).to(self.device)
         
         # 计算策略概率
-        probs = self.sl_policy.forward(observation)
+        probs = self.policy_network.forward(observation)
         log_prob = probs.gather(1, action.unsqueeze(1)).squeeze(1).log()
         
         # 计算准确率 (预测的最高概率动作与实际动作匹配的比例)
@@ -344,9 +329,9 @@ class NFSPAgent(BaseAgent):
         self.losses.append(loss.item())
         
         # 优化模型
-        self.sl_optimizer.zero_grad()
+        self.policy_optimizer.zero_grad()
         loss.backward()
-        self.sl_optimizer.step()
+        self.policy_optimizer.step()
     
     def step(self, obs):
         """根据观察选择动作，支持字典格式的observation"""
@@ -390,7 +375,7 @@ class NFSPAgent(BaseAgent):
         if self.policy_mode == 'best':
             probs = self.rl_eval_network.act(state_tensor, self.epsilon(self.count))
         else:
-            probs = self.sl_policy.act(state_tensor)
+            probs = self.policy_network.act(state_tensor)
         
         # 过滤不合法的动作
         valid_probs = action_mask(probs, legal_actions)
@@ -433,7 +418,7 @@ class NFSPAgent(BaseAgent):
         if self.eval_mode == 'best':
             probs = self.rl_eval_network.act(state_tensor, 0)  # 评估时不使用随机探索
         else:
-            probs = self.sl_policy.act(state_tensor)
+            probs = self.policy_network.act(state_tensor)
         
         # 过滤不合法的动作
         valid_probs = action_mask(probs, legal_actions)
@@ -449,7 +434,12 @@ class NFSPAgent(BaseAgent):
         """
         # 确认轨迹是单个转换样本，而不是列表
         if isinstance(traj, list) and len(traj) == 5:
-            state, action, reward, next_state, done = traj
+            obs, action, reward, next_obs, done = traj
+            
+            # 预处理观察为状态向量
+            state = self._preprocess_state(obs)
+            next_state = self._preprocess_state(next_obs) if not done else state
+            
             # 使用标准缓冲区方法添加经验
             self.rl_buffer.store(state, action, reward, next_state, done)
             
@@ -476,7 +466,7 @@ class NFSPAgent(BaseAgent):
         
         # 保存网络权重
         torch.save(self.rl_eval_network.state_dict(), f"{path}/nfsp_agent_{player_id}_q_network.pth")
-        torch.save(self.sl_policy.state_dict(), f"{path}/nfsp_agent_{player_id}_policy_network.pth")
+        torch.save(self.policy_network.state_dict(), f"{path}/nfsp_agent_{player_id}_policy_network.pth")
         
         # 保存模型元数据（保存状态大小信息，以便在不同观察模式下恢复）
         metadata = {
@@ -512,12 +502,12 @@ class NFSPAgent(BaseAgent):
             if not hasattr(self, 'networks_initialized') or not self.networks_initialized:
                 # 使用临时状态创建初始网络
                 dummy_state = np.zeros(self.state_size)
-                self._init_networks({'obs': dummy_state})
+                self._initialize_networks()
                 
             # 加载模型权重
             self.rl_eval_network.load_state_dict(torch.load(f"{path}/nfsp_agent_{player_id}_q_network.pth"))
             self.rl_target_network.load_state_dict(self.rl_eval_network.state_dict())
-            self.sl_policy.load_state_dict(torch.load(f"{path}/nfsp_agent_{player_id}_policy_network.pth"))
+            self.policy_network.load_state_dict(torch.load(f"{path}/nfsp_agent_{player_id}_policy_network.pth"))
             print(f"成功加载模型 - Agent {player_id}")
             
             return True
@@ -592,9 +582,9 @@ class NFSPAgent(BaseAgent):
 class AveragePolicy:
     def __init__(self, policy_network):
         # 检查输入类型
-        if hasattr(policy_network, 'sl_policy'):
+        if hasattr(policy_network, 'policy_network'):
             # 如果输入是NFSPAgent对象
-            self.policy = policy_network.sl_policy
+            self.policy = policy_network.policy_network
             if hasattr(policy_network, 'device'):
                 self.device = policy_network.device
             else:
