@@ -272,185 +272,126 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
 
 def plot_training_curve(history, num_episodes, eval_interval, nfsp_agents=None):
     """绘制训练曲线，包括四幅图：监督学习损失、策略准确率、强化学习损失和队伍总奖励"""
-    # 处理中文显示问题
-    use_english = True
+    # 数据预处理部分 - 将所有数据处理逻辑放在绘图之前
+    
+    # 预处理变量初始化
+    smooth_losses = None
+    smooth_acc = None
+    smooth_rl = None
+    team_rewards = None
+    smooth_rewards = None
+    
+    # 只使用第一个NFSP智能体数据
+    if nfsp_agents and len(nfsp_agents) > 0:
+        agent = nfsp_agents[0]
+        
+        # 处理监督学习损失
+        if len(agent.losses) > 0:
+            losses = np.array(agent.losses)
+            
+            # 降采样
+            if len(losses) > 1000:
+                step = len(losses) // 1000
+                losses = losses[::step]
+            
+            # 平滑处理
+            window_size = min(20, len(losses))
+            if window_size > 1:
+                smooth_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+        
+        # 处理策略准确率
+        if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > 0:
+            accuracies = np.array(agent.policy_accuracies)
+            
+            # 降采样
+            if len(accuracies) > 1000:
+                step = len(accuracies) // 1000
+                accuracies = accuracies[::step]
+            
+            # 平滑处理
+            window_size = min(20, len(accuracies))
+            if window_size > 1:
+                smooth_acc = np.convolve(accuracies, np.ones(window_size)/window_size, mode='valid')
+        
+        # 处理强化学习损失
+        if len(agent.RLlosses) > 0:
+            rl_losses = np.array(agent.RLlosses)
+            
+            # 降采样
+            if len(rl_losses) > 1000:
+                step = len(rl_losses) // 1000
+                rl_losses = rl_losses[::step]
+            
+            # 平滑处理
+            window_size = min(20, len(rl_losses))
+            if window_size > 1:
+                smooth_rl = np.convolve(rl_losses, np.ones(window_size)/window_size, mode='valid')
+    
+    # 处理团队奖励数据
+    raw_rewards = history['episode_rewards']
+    if len(raw_rewards) > 0:
+        # 检查数据格式并转换为numpy数组
+        if isinstance(raw_rewards[0], (list, np.ndarray)):
+            # 多智能体情况，计算团队总奖励
+            rewards = np.array([reward for reward in raw_rewards])
+            team_rewards = rewards.sum(axis=1)
+            
+            # 平滑处理团队奖励
+            window_size = min(50, len(team_rewards) // 10)  # 使用更大的窗口来平滑奖励曲线
+            if window_size > 1:
+                smooth_rewards = np.convolve(team_rewards, np.ones(window_size)/window_size, mode='valid')
+        else:
+            # 单智能体情况
+            team_rewards = np.array(raw_rewards)
+    
+    # 创建图形
     plt.figure(figsize=(16, 16))
     
     # 1. 监督学习损失 (左上角)
     plt.subplot(2, 2, 1)
-    
-    if nfsp_agents and len(nfsp_agents) > 0:
-        
-        # 计算所有智能体的平均损失
-        all_losses = []
-        max_length = 0
-        
-        # 确定最大长度并收集数据
-        for agent in nfsp_agents:
-            if len(agent.losses) > max_length:
-                max_length = len(agent.losses)
-        
-        # 初始化累积数组
-        if max_length > 0:
-            avg_losses = np.zeros(max_length)
-            count = np.zeros(max_length)
-            
-            # 累加每个智能体的损失
-            for agent in nfsp_agents:
-                losses = np.array(agent.losses)
-                avg_losses[:len(losses)] += losses
-                count[:len(losses)] += 1
-            
-            # 计算平均值（避免除零错误）
-            valid_indices = count > 0
-            avg_losses[valid_indices] /= count[valid_indices]
-            
-            # 降采样
-            if len(avg_losses) > 1000:
-                step = len(avg_losses) // 1000
-                avg_losses = avg_losses[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(avg_losses))
-            if window_size > 1:
-                smooth_avg = np.convolve(avg_losses, np.ones(window_size)/window_size, mode='valid')
-                plt.plot(smooth_avg, 'k-', linewidth=2, 
-                         label='Average SL Loss' if use_english else '平均SL损失')
-                
-        plt.xlabel('Training Steps' if use_english else '训练步数')
-        plt.ylabel('Loss' if use_english else '损失')
-        plt.title('Supervised Learning Loss' if use_english else '监督学习损失')
-        plt.grid(True)
-        plt.legend()
+    if smooth_losses is not None:
+        plt.plot(smooth_losses, 'k-', linewidth=2, label='SL Loss')
+    plt.xlabel('Training Steps')
+    plt.ylabel('Loss')
+    plt.title('Supervised Learning Loss')
+    plt.grid(True)
+    plt.legend()
     
     # 2. 策略准确率 (右上角)
     plt.subplot(2, 2, 2)
-    
-    if nfsp_agents and len(nfsp_agents) > 0:
-        # 如果智能体数量较多，也绘制平均准确率
-        if len(nfsp_agents) > 1:
-            # 计算所有智能体的平均准确率
-            max_length = 0
-            
-            # 确定最大长度
-            for agent in nfsp_agents:
-                if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > max_length:
-                    max_length = len(agent.policy_accuracies)
-            
-            # 初始化累积数组
-            if max_length > 0:
-                avg_acc = np.zeros(max_length)
-                count = np.zeros(max_length)
-                
-                # 累加每个智能体的准确率
-                for agent in nfsp_agents:
-                    if hasattr(agent, 'policy_accuracies'):
-                        acc = np.array(agent.policy_accuracies)
-                        avg_acc[:len(acc)] += acc
-                        count[:len(acc)] += 1
-                
-                # 计算平均值
-                valid_indices = count > 0
-                avg_acc[valid_indices] /= count[valid_indices]
-                
-                # 降采样
-                if len(avg_acc) > 1000:
-                    step = len(avg_acc) // 1000
-                    avg_acc = avg_acc[::step]
-                
-                # 平滑处理
-                window_size = min(20, len(avg_acc))
-                if window_size > 1:
-                    smooth_avg = np.convolve(avg_acc, np.ones(window_size)/window_size, mode='valid')
-                    plt.plot(smooth_avg, 'k-', linewidth=2, 
-                             label='Average Accuracy' if use_english else '平均准确率')
-        
-        plt.xlabel('Training Steps' if use_english else '训练步数')
-        plt.ylabel('Accuracy' if use_english else '准确率')
-        plt.title('Policy Accuracy' if use_english else '策略准确率')
-        plt.grid(True)
-        plt.legend()
+    if smooth_acc is not None:
+        plt.plot(smooth_acc, 'k-', linewidth=2, label='Policy Accuracy')
+    plt.xlabel('Training Steps')
+    plt.ylabel('Accuracy')
+    plt.title('Policy Accuracy')
+    plt.grid(True)
+    plt.legend()
     
     # 3. 强化学习损失 (左下角)
     plt.subplot(2, 2, 3)
-    
-    if nfsp_agents and len(nfsp_agents) > 0:
-        
-        # 计算所有智能体的平均RL损失
-        max_length = 0
-        
-        # 确定最大长度
-        for agent in nfsp_agents:
-            if len(agent.RLlosses) > max_length:
-                max_length = len(agent.RLlosses)
-        
-        # 初始化累积数组
-        if max_length > 0:
-            avg_rl = np.zeros(max_length)
-            count = np.zeros(max_length)
-            
-            # 累加每个智能体的RL损失
-            for agent in nfsp_agents:
-                rl = np.array(agent.RLlosses)
-                avg_rl[:len(rl)] += rl
-                count[:len(rl)] += 1
-            
-            # 计算平均值
-            valid_indices = count > 0
-            avg_rl[valid_indices] /= count[valid_indices]
-            
-            # 降采样
-            if len(avg_rl) > 1000:
-                step = len(avg_rl) // 1000
-                avg_rl = avg_rl[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(avg_rl))
-            if window_size > 1:
-                smooth_avg = np.convolve(avg_rl, np.ones(window_size)/window_size, mode='valid')
-                plt.plot(smooth_avg, 'k-', linewidth=2, 
-                         label='Average RL Loss' if use_english else '平均RL损失')
-        
-        plt.xlabel('Training Steps' if use_english else '训练步数')
-        plt.ylabel('Loss' if use_english else '损失')
-        plt.title('Reinforcement Learning Loss' if use_english else '强化学习损失')
-        plt.grid(True)
-        plt.legend()
+    if smooth_rl is not None:
+        plt.plot(smooth_rl, 'k-', linewidth=2, label='RL Loss')
+    plt.xlabel('Training Steps')
+    plt.ylabel('Loss')
+    plt.title('Reinforcement Learning Loss')
+    plt.grid(True)
+    plt.legend()
     
     # 4. 队伍总奖励 (右下角)
     plt.subplot(2, 2, 4)
-    raw_rewards = history['episode_rewards']
+    if team_rewards is not None:
+        window_size = min(50, len(team_rewards) // 10)
+        # 画出原始数据（较浅的颜色）
+        plt.plot(np.arange(len(team_rewards)), team_rewards, 'b-', alpha=0.3, label='Raw Team Reward')
+        
+        # 如果有平滑数据，也画出平滑后的数据
+        if smooth_rewards is not None:
+            plt.plot(np.arange(len(smooth_rewards)) + window_size//2, smooth_rewards, 'b-', 
+                     linewidth=2, label='Smoothed Team Reward')
     
-    if len(raw_rewards) > 0:
-        # 检查数据格式并转换为numpy数组
-        if isinstance(raw_rewards[0], (list, np.ndarray)):
-            # 多智能体情况，绘制团队总奖励
-            rewards = np.array([reward for reward in raw_rewards])
-            team_rewards = rewards.sum(axis=1)
-             # 平滑处理团队奖励
-            window_size = min(50, len(team_rewards) // 10)  # 使用更大的窗口来平滑奖励曲线
-            if window_size > 1:
-                smooth_rewards = np.convolve(team_rewards, np.ones(window_size)/window_size, mode='valid')
-                # 画出原始数据（较浅的颜色）
-                plt.plot(np.arange(len(team_rewards)), team_rewards, 'b-', alpha=0.3, 
-                         label='Raw Team Reward' if use_english else '原始队伍奖励')
-                # 画出平滑后的数据（较深的颜色）
-                plt.plot(np.arange(len(smooth_rewards)) + window_size//2, smooth_rewards, 'b-', linewidth=2, 
-                         label='Smoothed Team Reward' if use_english else '平滑队伍奖励')
-            else:
-                # 如果数据量太少，无法平滑，就直接绘制原始数据
-                plt.plot(np.arange(len(team_rewards)), team_rewards, 'b-', 
-                         label='Team Total Reward' if use_english else '队伍总奖励')
-            
-        else:
-            # 单智能体情况
-            rewards = np.array(raw_rewards)
-            plt.plot(np.arange(len(rewards)), rewards, 'b-', 
-                     label='Agent Reward' if use_english else '智能体奖励')
-    
-    plt.xlabel('Episodes' if use_english else '回合')
-    plt.ylabel('Reward' if use_english else '奖励')
-    plt.title('Team Total Reward' if use_english else '队伍总奖励')
+    plt.xlabel('Episodes')
+    plt.ylabel('Reward')
+    plt.title('Team Total Reward')
     plt.grid(True)
     plt.legend()
     
