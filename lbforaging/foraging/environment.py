@@ -62,6 +62,261 @@ class Player:
             return "Player"
 
 
+class ObservationHandler:
+    """处理环境观测的基类"""
+    
+    def __init__(self, env, sight=None):
+        self.env = env  # 保存环境的引用
+        self.sight = sight or env.sight  # 视野范围，默认使用环境的视野
+        
+    def get_observation(self, player_idx, observation):
+        """获取处理后的观测，基类方法需要被子类重写"""
+        raise NotImplementedError("子类必须实现此方法")
+        
+    def _generate_raw_obs(self, player_idx):
+        """生成原始观测数据，用于gym接口，需要被子类重写"""
+        raise NotImplementedError("子类必须实现此方法")
+    
+    def set_sight(self, sight):
+        """设置观测处理器的视野范围"""
+        self.sight = sight
+        return self
+
+
+class DefaultObservation(ObservationHandler):
+    """默认观测处理器 - 用于对手策略"""
+    
+    def get_observation(self, player_idx, observation):
+        """返回标准格式的观测"""
+        if isinstance(observation, tuple):
+            # 直接使用原始的gym观测格式
+            return {'obs': observation[player_idx], 'actions': [action.value for action in self.env._valid_actions[self.env.players[player_idx]]]}
+        else:
+            # 处理自定义观测格式
+            valid_actions = [action.value for action in self.env._valid_actions[self.env.players[player_idx]]]
+            return {'obs': observation, 'actions': valid_actions}
+
+
+class ThreeLayerObservation(ObservationHandler):
+    """三层观测处理器 - 为NFSP智能体提供三层表示"""
+    
+    def get_observation(self, player_idx, observation):
+        """将标准观测转换为三层表示"""
+        # 已经是三层观测格式
+        if isinstance(observation, tuple) and len(observation) > 0:
+            obs = observation[player_idx]
+            if isinstance(obs, np.ndarray) and obs.shape[0] == 3:
+                valid_actions = [action.value for action in self.env._valid_actions[self.env.players[player_idx]]]
+                return {'obs': obs, 'actions': valid_actions}
+        
+        # 需要从标准观测生成三层观测
+        return self._generate_three_layer_obs(player_idx)
+    
+    def _generate_three_layer_obs(self, player_idx):
+        """从当前环境状态生成三层观测"""
+        current_player = self.env.players[player_idx]
+        grid_size = 5
+        grid_shape = (grid_size, grid_size)
+        
+        # 创建三个层
+        self_layer = np.zeros(grid_shape, dtype=np.float32)
+        other_agents_layer = np.zeros(grid_shape, dtype=np.float32)
+        food_layer = np.zeros(grid_shape, dtype=np.float32)
+        
+        # 计算视野中心
+        center_x, center_y = current_player.position
+        
+        # 遍历5x5视野区域
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                # 计算绝对坐标
+                abs_x = center_x + dx
+                abs_y = center_y + dy
+                
+                # 坐标转换为5x5网格中的位置
+                grid_x = dx + 2
+                grid_y = dy + 2
+                
+                # 检查是否在场景内
+                if 0 <= abs_x < self.env.rows and 0 <= abs_y < self.env.cols:
+                    # 检查是否为当前智能体
+                    if abs_x == center_x and abs_y == center_y:
+                        self_layer[grid_x, grid_y] = current_player.level if self.env._observe_agent_levels else 1
+                    
+                    # 检查是否有其他智能体
+                    for player in self.env.players:
+                        if player != current_player and player.position == (abs_x, abs_y):
+                            other_agents_layer[grid_x, grid_y] = player.level if self.env._observe_agent_levels else 1
+                    
+                    # 检查是否有食物
+                    if self.env.field[abs_x, abs_y] > 0:
+                        food_layer[grid_x, grid_y] = self.env.field[abs_x, abs_y]
+        
+        # 将三层堆叠起来
+        agent_obs = np.stack([self_layer, other_agents_layer, food_layer])
+        valid_actions = [action.value for action in self.env._valid_actions[current_player]]
+        
+        return {'obs': agent_obs, 'actions': valid_actions}
+
+    def _generate_raw_obs(self, player_idx):
+        """生成原始三层观测数据，用于gym接口"""
+        current_player = self.env.players[player_idx]
+        grid_size = 5
+        grid_shape = (grid_size, grid_size)
+        
+        # 创建三个层
+        self_layer = np.zeros(grid_shape, dtype=np.float32)
+        other_agents_layer = np.zeros(grid_shape, dtype=np.float32)
+        food_layer = np.zeros(grid_shape, dtype=np.float32)
+        
+        # 计算视野中心
+        center_x, center_y = current_player.position
+        
+        # 遍历5x5视野区域
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                # 计算绝对坐标
+                abs_x = center_x + dx
+                abs_y = center_y + dy
+                
+                # 坐标转换为5x5网格中的位置
+                grid_x = dx + 2
+                grid_y = dy + 2
+                
+                # 检查是否在场景内
+                if 0 <= abs_x < self.env.rows and 0 <= abs_y < self.env.cols:
+                    # 检查是否为当前智能体
+                    if abs_x == center_x and abs_y == center_y:
+                        self_layer[grid_x, grid_y] = current_player.level if self.env._observe_agent_levels else 1
+                    
+                    # 检查是否有其他智能体
+                    for player in self.env.players:
+                        if player != current_player and player.position == (abs_x, abs_y):
+                            other_agents_layer[grid_x, grid_y] = player.level if self.env._observe_agent_levels else 1
+                    
+                    # 检查是否有食物
+                    if self.env.field[abs_x, abs_y] > 0:
+                        food_layer[grid_x, grid_y] = self.env.field[abs_x, abs_y]
+        
+        # 将三层堆叠起来并返回
+        return np.stack([self_layer, other_agents_layer, food_layer])
+
+
+class GridObservation(ObservationHandler):
+    """网格观测处理器 - 为NFSP智能体提供标准网格表示"""
+    
+    def get_observation(self, player_idx, observation):
+        """将标准观测转换为网格表示"""
+        # 已经是网格观测格式
+        if isinstance(observation, tuple) and len(observation) > 0:
+            obs = observation[player_idx]
+            if isinstance(obs, np.ndarray) and obs.shape[0] == 4:  # 4层网格观测
+                valid_actions = [action.value for action in self.env._valid_actions[self.env.players[player_idx]]]
+                return {'obs': obs, 'actions': valid_actions}
+        
+        # 需要从标准观测生成网格观测
+        return self._generate_grid_obs(player_idx)
+    
+    def _generate_grid_obs(self, player_idx):
+        """从当前环境状态生成网格观测"""
+        current_player = self.env.players[player_idx]
+        
+        # 创建全局网格数组
+        global_layers = self._make_global_grid_arrays()
+        
+        # 计算当前智能体观测的边界
+        agent_x, agent_y = current_player.position
+        start_x, end_x, start_y, end_y = self._get_agent_grid_bounds(agent_x, agent_y)
+        
+        # 获取当前智能体的视野范围内的网格
+        agent_view = global_layers[:, start_x:end_x, start_y:end_y].copy()
+        
+        # 创建自身识别层 - 只在当前智能体位置标记为1
+        self_layer = np.zeros((end_x-start_x, end_y-start_y), dtype=np.float32)
+        
+        # 计算智能体在视野中的相对坐标
+        rel_agent_x = min(self.env.sight, agent_x)
+        rel_agent_y = min(self.env.sight, agent_y)
+        self_layer[rel_agent_x, rel_agent_y] = 1.0
+        
+        # 将自身识别层加入到观测中
+        agent_view_with_self = np.concatenate([agent_view, self_layer[np.newaxis, :, :]], axis=0)
+        
+        valid_actions = [action.value for action in self.env._valid_actions[current_player]]
+        return {'obs': agent_view_with_self, 'actions': valid_actions}
+    
+    def _make_global_grid_arrays(self):
+        """创建全局网格数组"""
+        grid_shape_x, grid_shape_y = self.env.field_size
+        grid_shape_x += 2 * self.sight  # 使用观测处理器的sight而非环境的sight
+        grid_shape_y += 2 * self.sight
+        grid_shape = (grid_shape_x, grid_shape_y)
+
+        agents_layer = np.zeros(grid_shape, dtype=np.float32)
+        for player in self.env.players:
+            player_x, player_y = player.position
+            if self.env._observe_agent_levels:
+                agents_layer[player_x + self.sight, player_y + self.sight] = player.level
+            else:
+                agents_layer[player_x + self.sight, player_y + self.sight] = 1
+
+        foods_layer = np.zeros(grid_shape, dtype=np.float32)
+        foods_layer[self.sight : -self.sight, self.sight : -self.sight] = self.env.field.copy()
+
+        access_layer = np.ones(grid_shape, dtype=np.float32)
+        # 边界外区域不可访问
+        access_layer[: self.sight, :] = 0.0
+        access_layer[-self.sight :, :] = 0.0
+        access_layer[:, : self.sight] = 0.0
+        access_layer[:, -self.sight :] = 0.0
+        # 智能体位置不可访问
+        for player in self.env.players:
+            player_x, player_y = player.position
+            access_layer[player_x + self.sight, player_y + self.sight] = 0.0
+        # 食物位置不可访问
+        foods_x, foods_y = self.env.field.nonzero()
+        for x, y in zip(foods_x, foods_y):
+            access_layer[x + self.sight, y + self.sight] = 0.0
+
+        return np.stack([agents_layer, foods_layer, access_layer])
+    
+    def _get_agent_grid_bounds(self, agent_x, agent_y):
+        """获取智能体网格观测的边界"""
+        return (
+            agent_x,
+            agent_x + 2 * self.sight + 1,  # 使用观测处理器的sight
+            agent_y,
+            agent_y + 2 * self.sight + 1,
+        )
+
+    def _generate_raw_obs(self, player_idx):
+        """生成原始网格观测数据，用于gym接口"""
+        current_player = self.env.players[player_idx]
+        
+        # 创建全局网格数组
+        global_layers = self._make_global_grid_arrays()
+        
+        # 计算当前智能体观测的边界
+        agent_x, agent_y = current_player.position
+        start_x, end_x, start_y, end_y = self._get_agent_grid_bounds(agent_x, agent_y)
+        
+        # 获取当前智能体的视野范围内的网格
+        agent_view = global_layers[:, start_x:end_x, start_y:end_y].copy()
+        
+        # 创建自身识别层 - 只在当前智能体位置标记为1
+        self_layer = np.zeros((end_x-start_x, end_y-start_y), dtype=np.float32)
+        
+        # 计算智能体在视野中的相对坐标
+        rel_agent_x = min(self.env.sight, agent_x)
+        rel_agent_y = min(self.env.sight, agent_y)
+        self_layer[rel_agent_x, rel_agent_y] = 1.0
+        
+        # 将自身识别层加入到观测中
+        agent_view_with_self = np.concatenate([agent_view, self_layer[np.newaxis, :, :]], axis=0)
+        
+        return agent_view_with_self
+
+
 class ForagingEnv(gym.Env):
     """
     A class that contains rules/actions for the game level-based foraging.
@@ -98,9 +353,8 @@ class ForagingEnv(gym.Env):
         observe_agent_levels=True,
         penalty=0.0,
         render_mode=None,
-        step_reward_factor=0.5,  # 步数奖励因子
-        step_reward_threshold=0.1,  # 步数奖励阈值，表示最大步数的比例
         three_layer_obs=False,  # 新增参数：是否使用三层观测模式
+        observation_handlers=None,
     ):
         self.logger = logging.getLogger(__name__)
         self.render_mode = render_mode
@@ -109,10 +363,6 @@ class ForagingEnv(gym.Env):
         self.field = np.zeros(field_size, np.int32)
 
         self.penalty = penalty
-        
-        # 步数奖励相关参数
-        self.step_reward_factor = step_reward_factor
-        self.step_reward_threshold = step_reward_threshold
 
         # 观测模式设置
         self._grid_observation = grid_observation
@@ -194,6 +444,9 @@ class ForagingEnv(gym.Env):
         self.viewer = None
 
         self.n_agents = len(self.players)
+
+        # 初始化观测处理器
+        self.observation_handlers = observation_handlers or [DefaultObservation(self)] * len(self.players)
 
     def seed(self, seed=None):
         if seed is not None:
@@ -491,11 +744,14 @@ class ForagingEnv(gym.Env):
         )
 
     def get_valid_actions(self) -> list:
-        return list(product(*[self._valid_actions[player] for player in self.players]))
+        """获取所有有效动作组合的列表，返回整数值动作而非枚举"""
+        valid_actions_enum = [self._valid_actions[player] for player in self.players]
+        valid_actions_int = [[action.value for action in actions] for actions in valid_actions_enum]
+        return list(product(*valid_actions_int))
 
     def _make_obs(self, player):
         return self.Observation(
-            actions=self._valid_actions[player],
+            actions=[action.value for action in self._valid_actions[player]],
             players=[
                 self.PlayerObservation(
                     position=self._transform_to_neighborhood(
@@ -530,191 +786,76 @@ class ForagingEnv(gym.Env):
         )
 
     def _make_gym_obs(self):
-        def make_obs_array(observation):
-            obs = np.zeros(self.observation_space[0].shape, dtype=np.float32)
-            # obs[: observation.field.size] = observation.field.flatten()
-            # self player is always first
-            seen_players = [p for p in observation.players if p.is_self] + [
-                p for p in observation.players if not p.is_self
-            ]
-
-            for i in range(self.max_num_food):
-                obs[3 * i] = -1
-                obs[3 * i + 1] = -1
-                obs[3 * i + 2] = 0
-
-            for i, (y, x) in enumerate(zip(*np.nonzero(observation.field))):
-                obs[3 * i] = y
-                obs[3 * i + 1] = x
-                obs[3 * i + 2] = observation.field[y, x]
-
-            player_obs_len = 3 if self._observe_agent_levels else 2
-            for i in range(len(self.players)):
-                obs[self.max_num_food * 3 + player_obs_len * i] = -1
-                obs[self.max_num_food * 3 + player_obs_len * i + 1] = -1
-                if self._observe_agent_levels:
-                    obs[self.max_num_food * 3 + player_obs_len * i + 2] = 0
-
-            for i, p in enumerate(seen_players):
-                obs[self.max_num_food * 3 + player_obs_len * i] = p.position[0]
-                obs[self.max_num_food * 3 + player_obs_len * i + 1] = p.position[1]
-                if self._observe_agent_levels:
-                    obs[self.max_num_food * 3 + player_obs_len * i + 2] = p.level
-
-            return obs
-
-        def make_global_grid_arrays():
-            """
-            创建全局网格数组
-            """
-            grid_shape_x, grid_shape_y = self.field_size
-            grid_shape_x += 2 * self.sight
-            grid_shape_y += 2 * self.sight
-            grid_shape = (grid_shape_x, grid_shape_y)
-
-            agents_layer = np.zeros(grid_shape, dtype=np.float32)
-            for player in self.players:
-                player_x, player_y = player.position
-                if self._observe_agent_levels:
-                    agents_layer[player_x + self.sight, player_y + self.sight] = (
-                        player.level
-                    )
-                else:
-                    agents_layer[player_x + self.sight, player_y + self.sight] = 1
-
-            foods_layer = np.zeros(grid_shape, dtype=np.float32)
-            foods_layer[self.sight : -self.sight, self.sight : -self.sight] = (
-                self.field.copy()
-            )
-
-            access_layer = np.ones(grid_shape, dtype=np.float32)
-            # out of bounds not accessible
-            access_layer[: self.sight, :] = 0.0
-            access_layer[-self.sight :, :] = 0.0
-            access_layer[:, : self.sight] = 0.0
-            access_layer[:, -self.sight :] = 0.0
-            # agent locations are not accessible
-            for player in self.players:
-                player_x, player_y = player.position
-                access_layer[player_x + self.sight, player_y + self.sight] = 0.0
-            # food locations are not accessible
-            foods_x, foods_y = self.field.nonzero()
-            for x, y in zip(foods_x, foods_y):
-                access_layer[x + self.sight, y + self.sight] = 0.0
-
-            # 返回三层堆叠的观测（不再生成self_layer，将改为根据每个智能体区分）
-            return np.stack([agents_layer, foods_layer, access_layer])
-            
-        def get_agent_grid_bounds(agent_x, agent_y):
-            return (
-                agent_x,
-                agent_x + 2 * self.sight + 1,
-                agent_y,
-                agent_y + 2 * self.sight + 1,
-            )
-            
-        def make_three_layer_observation():
-            """
-            创建三层观测模式：当前智能体、友方智能体和食物
-            """
-            # 创建一个全局的5x5场景
-            grid_size = 5
-            grid_shape = (grid_size, grid_size)
-            
-            # 获取所有玩家的观测结果
-            nobs = []
-            for i, current_player in enumerate(self.players):
-                # 创建三个层
-                self_layer = np.zeros(grid_shape, dtype=np.float32)
-                other_agents_layer = np.zeros(grid_shape, dtype=np.float32)
-                food_layer = np.zeros(grid_shape, dtype=np.float32)
-                
-                # 计算视野中心
-                center_x, center_y = current_player.position
-                
-                # 遍历5x5视野区域
-                for dx in range(-2, 3):
-                    for dy in range(-2, 3):
-                        # 计算绝对坐标
-                        abs_x = center_x + dx
-                        abs_y = center_y + dy
-                        
-                        # 坐标转换为5x5网格中的位置
-                        grid_x = dx + 2
-                        grid_y = dy + 2
-                        
-                        # 检查是否在场景内
-                        if 0 <= abs_x < self.rows and 0 <= abs_y < self.cols:
-                            # 检查是否为当前智能体
-                            if abs_x == center_x and abs_y == center_y:
-                                self_layer[grid_x, grid_y] = current_player.level if self._observe_agent_levels else 1
-                            
-                            # 检查是否有其他智能体
-                            for player in self.players:
-                                if player != current_player and player.position == (abs_x, abs_y):
-                                    other_agents_layer[grid_x, grid_y] = player.level if self._observe_agent_levels else 1
-                            
-                            # 检查是否有食物
-                            if self.field[abs_x, abs_y] > 0:
-                                food_layer[grid_x, grid_y] = self.field[abs_x, abs_y]
-                
-                # 将三层堆叠起来
-                agent_obs = np.stack([self_layer, other_agents_layer, food_layer])
-                nobs.append(agent_obs)
-                
-            return tuple(nobs)
-
-        # 获取所有玩家的基本观测
-        observations = [self._make_obs(player) for player in self.players]
+        """生成符合gym接口的观测数据"""
+        # 基础观测数据 - 直接从环境状态中获取
+        base_observations = [self._make_obs(player) for player in self.players]
         
-        if self._three_layer_obs:
-            # 使用三层观测模式
-            nobs = make_three_layer_observation()
-        elif self._grid_observation:
-            # 获取全局网格数组
-            global_layers = make_global_grid_arrays()
+        # 使用观测处理器生成符合gym接口的观测数据
+        nobs = []
+        for i, player in enumerate(self.players):
+            # 获取当前智能体的观测处理器
+            handler = self.observation_handlers[i]
             
-            # 为每个智能体生成各自的观测
-            nobs = []
-            for i, player in enumerate(self.players):
-                # 计算当前智能体观测的边界
-                agent_x, agent_y = player.position
-                start_x, end_x, start_y, end_y = get_agent_grid_bounds(agent_x, agent_y)
-                
-                # 获取当前智能体的视野范围内的网格
-                agent_view = global_layers[:, start_x:end_x, start_y:end_y].copy()
-                
-                # 创建自身识别层 - 只在当前智能体位置标记为1
-                self_layer = np.zeros((end_x-start_x, end_y-start_y), dtype=np.float32)
-                
-                # 计算智能体在视野中的相对坐标
-                rel_agent_x = min(self.sight, agent_x)
-                rel_agent_y = min(self.sight, agent_y)
-                self_layer[rel_agent_x, rel_agent_y] = 1.0
-                
-                # 将自身识别层加入到观测中
-                agent_view_with_self = np.concatenate([agent_view, self_layer[np.newaxis, :, :]], axis=0)
-                
-                nobs.append(agent_view_with_self)
+            # 根据观测类型生成对应格式的观测
+            if isinstance(handler, ThreeLayerObservation) and self._three_layer_obs:
+                obs = handler._generate_raw_obs(i)
+            elif isinstance(handler, GridObservation) and self._grid_observation:
+                obs = handler._generate_raw_obs(i)
+            else:
+                # 标准观测格式
+                obs = self._make_standard_obs_array(base_observations[i])
             
-            nobs = tuple(nobs)
-        else:
-            nobs = tuple([make_obs_array(obs) for obs in observations])
+            nobs.append(obs)
         
-        # 检查观测空间
+        # 转换为元组并检查观测空间
+        nobs = tuple(nobs)
         for i, obs in enumerate(nobs):
             assert self.observation_space[i].contains(
                 obs
             ), f"obs space error: obs: {obs}, obs_space: {self.observation_space[i]}"
-
+            
         return nobs
+    
+    def _make_standard_obs_array(self, observation):
+        """将基础观测转换为标准数组格式"""
+        obs = np.zeros(self.observation_space[0].shape, dtype=np.float32)
+        # 自玩家始终在第一位
+        seen_players = [p for p in observation.players if p.is_self] + [
+            p for p in observation.players if not p.is_self
+        ]
+
+        for i in range(self.max_num_food):
+            obs[3 * i] = -1
+            obs[3 * i + 1] = -1
+            obs[3 * i + 2] = 0
+
+        for i, (y, x) in enumerate(zip(*np.nonzero(observation.field))):
+            obs[3 * i] = y
+            obs[3 * i + 1] = x
+            obs[3 * i + 2] = observation.field[y, x]
+
+        player_obs_len = 3 if self._observe_agent_levels else 2
+        for i in range(len(self.players)):
+            obs[self.max_num_food * 3 + player_obs_len * i] = -1
+            obs[self.max_num_food * 3 + player_obs_len * i + 1] = -1
+            if self._observe_agent_levels:
+                obs[self.max_num_food * 3 + player_obs_len * i + 2] = 0
+
+        for i, p in enumerate(seen_players):
+            obs[self.max_num_food * 3 + player_obs_len * i] = p.position[0]
+            obs[self.max_num_food * 3 + player_obs_len * i + 1] = p.position[1]
+            if self._observe_agent_levels:
+                obs[self.max_num_food * 3 + player_obs_len * i + 2] = p.level
+
+        return obs
 
     def _get_info(self):
         return {}
 
     def reset(self, seed=None, options=None):
+        """重置环境并返回初始观测"""
         if seed is not None:
-            # setting seed
+            # 设置随机种子
             super().reset(seed=seed, options=options)
 
         self.field = np.zeros(self.field_size, np.int32)
@@ -732,22 +873,31 @@ class ForagingEnv(gym.Env):
         self._game_over = False
         self._gen_valid_moves()
 
-        nobs = self._make_gym_obs()
-        return nobs, self._get_info()
+        # 生成符合gym接口的观测数据
+        raw_obs = self._make_gym_obs()
+        
+        # 处理观测
+        if hasattr(self, 'observation_handlers') and self.observation_handlers:
+            # 如果在run方法中会用到观测处理器，这里不需要额外处理
+            pass
+        
+        return raw_obs, self._get_info()
 
     def step(self, actions):
-
+        """执行动作并返回下一个状态"""
         for p in self.players:
             p.reward = 0
 
+        # 将整数动作转换为Action枚举
         actions = [
-            Action(a) if Action(a) in self._valid_actions[p] else Action.NONE
+            Action(a) if isinstance(a, int) and 0 <= a <= 5 else Action(a) if isinstance(a, Action) else Action.NONE
             for p, a in zip(self.players, actions)
         ]
 
-        # check if actions are valid
+        # 检查动作是否有效
         for i, (player, action) in enumerate(zip(self.players, actions)):
-            if action not in self._valid_actions[player]:
+            valid_action_values = [a.value for a in self._valid_actions[player]]
+            if action.value not in valid_action_values:
                 self.logger.info(
                     "{}{} attempted invalid action {}.".format(
                         player.name, player.position, action
@@ -757,11 +907,11 @@ class ForagingEnv(gym.Env):
 
         loading_players = set()
 
-        # move players
-        # if two or more players try to move to the same location they all fail
+        # 处理智能体移动
+        # 如果两个或更多智能体尝试移动到同一位置，则都失败
         collisions = defaultdict(list)
 
-        # so check for collisions
+        # 检查碰撞
         for player, action in zip(self.players, actions):
             if action == Action.NONE:
                 collisions[player.position].append(player)
@@ -777,15 +927,15 @@ class ForagingEnv(gym.Env):
                 collisions[player.position].append(player)
                 loading_players.add(player)
 
-        # and do movements for non colliding players
+        # 执行非碰撞智能体的移动
         for k, v in collisions.items():
-            if len(v) > 1:  # make sure no more than an player will arrive at location
+            if len(v) > 1:  # 确保不会有多个智能体到达同一位置
                 continue
             v[0].position = k
 
-        # finally process the loadings:
+        # 处理加载操作
         while loading_players:
-            # find adjacent food
+            # 查找相邻的食物
             player = loading_players.pop()
             frow, fcol = self.adjacent_food_location(*player.position)
             food = self.field[frow, fcol]
@@ -799,19 +949,19 @@ class ForagingEnv(gym.Env):
             loading_players = loading_players - set(adj_players)
 
             if adj_player_level < food:
-                # failed to load
+                # 加载失败
                 for a in adj_players:
                     a.reward -= self.penalty
                 continue
 
-            # else the food was loaded and each player scores points
+            # 食物被加载，每个玩家得分
             for a in adj_players:
                 a.reward = float(a.level * food)
                 if self._normalize_reward:
                     a.reward = a.reward / float(
                         adj_player_level * self._food_spawned
-                    )  # normalize reward
-            # and the food is removed
+                    )  # 规范化奖励
+            # 移除食物
             self.field[frow, fcol] = 0
 
         for a in actions:
@@ -831,7 +981,15 @@ class ForagingEnv(gym.Env):
         truncated = False
         info = self._get_info()
 
-        return self._make_gym_obs(), rewards, done, truncated, info
+        # 生成符合gym接口的观测数据
+        raw_obs = self._make_gym_obs()
+        
+        # 处理观测
+        if hasattr(self, 'observation_handlers') and self.observation_handlers:
+            # 如果在run方法中会用到观测处理器，这里不需要额外处理
+            pass
+        
+        return raw_obs, rewards, done, truncated, info
 
     def _init_render(self):
         from .rendering import Viewer
@@ -890,26 +1048,20 @@ class ForagingEnv(gym.Env):
             # 收集动作
             actions = []
             for i, player in enumerate(self.players):
-                # 提取有效动作
-                valid_actions = [action.value for action in self._valid_actions[player]]
-                
-                # 构建observation字典 - 支持网格观察和非网格观察模式
-                obs_dict = {
-                    'obs': obss[i],
-                    'actions': valid_actions  # 使用实际有效的动作，不是所有动作
-                }
+                # 使用对应的观测处理器处理观测
+                processed_obs = self.observation_handlers[i].get_observation(i, obss)
                 
                 # 让智能体选择动作
                 if player.controller:
-                    action = player.step(obs_dict)
+                    action = player.step(processed_obs)
                 else:
                     # 如果没有控制器，随机选择动作
-                    action = np.random.choice(valid_actions)
+                    action = np.random.choice(processed_obs['actions'])
                 
                 # 检测重复动作模式
                 if self._repeated_actions_detected(action, actions_buffs[i]):
                     # 如果检测到重复，选择一个不同的随机动作
-                    other_valid_actions = [a for a in valid_actions if a != action]
+                    other_valid_actions = [a for a in processed_obs['actions'] if a != action]
                     if other_valid_actions:  # 确保有其他有效动作可选
                         action = np.random.choice(other_valid_actions)
                 # 记录动作到缓冲区
@@ -924,18 +1076,18 @@ class ForagingEnv(gym.Env):
             
             # 记录每个智能体的轨迹
             for i in range(len(self.players)):
-                next_valid_actions = [action.value for action in self._valid_actions[self.players[i]]]
+                # 使用对应的观测处理器处理下一个观测
+                processed_next_obs = self.observation_handlers[i].get_observation(i, next_obss)
                 
                 # 轨迹格式：[obs_dict, action, reward, next_obs_dict, done]
                 trajectory_segment = [
-                    {'obs': obss[i], 'actions': valid_actions},  # 当前观察和有效动作
+                    processed_obs,  # 当前观察和有效动作
                     actions[i],
                     rewards[i],
-                    {'obs': next_obss[i], 'actions': next_valid_actions},  # 下一观察和有效动作
+                    processed_next_obs,  # 下一观察和有效动作
                     done
                 ]
                 trajectories[i].append(trajectory_segment)
-
 
             # 更新观察
             obss = next_obss
@@ -981,7 +1133,7 @@ class ForagingEnv(gym.Env):
         # 单目标情况下使用较严格的检测
         if food_count <= 1:
             # 检测循环模式：如果缓冲区足够长，检查是否有2步或3步的循环
-            if len(actions_buff) >= 3 and action != 5:
+            if len(actions_buff) >= 3 and action != 5:  # Action.LOAD.value = 5
                 # 超过3次连续相同动作视为重复
                 if action == actions_buff[-1] == actions_buff[-2] == actions_buff[-3]:
                     return True
@@ -1037,6 +1189,26 @@ class ForagingEnv(gym.Env):
                     return True
                     
         return False
+    
+    def set_observation_handler(self, player_idx, handler_type, sight=None):
+        """为指定玩家设置观测处理器
+        
+        参数:
+            player_idx: 玩家索引
+            handler_type: 处理器类型，'default'、'three_layer'或'grid'
+            sight: 视野范围，如不指定则使用环境的默认视野
+        """
+        # 使用当前环境的视野或指定的视野
+        handler_sight = sight if sight is not None else self.sight
+        
+        if handler_type == 'default':
+            self.observation_handlers[player_idx] = DefaultObservation(self, sight=handler_sight)
+        elif handler_type == 'three_layer':
+            self.observation_handlers[player_idx] = ThreeLayerObservation(self, sight=handler_sight)
+        elif handler_type == 'grid':
+            self.observation_handlers[player_idx] = GridObservation(self, sight=handler_sight)
+        else:
+            raise ValueError(f"未知的观测处理器类型: {handler_type}")
         
     def update_sight(self, new_sight):
         """更新视野范围并重新计算观测空间"""
@@ -1047,6 +1219,11 @@ class ForagingEnv(gym.Env):
         self.observation_space = gym.spaces.Tuple(
             tuple([self._get_observation_space()] * len(self.players))
         )
+        
+        # 同步更新所有观测处理器的视野
+        if hasattr(self, 'observation_handlers') and self.observation_handlers:
+            for handler in self.observation_handlers:
+                handler.set_sight(new_sight)
         
         self.logger.info(f"已更新视野范围: {old_sight} -> {new_sight}")
         return self.observation_space
