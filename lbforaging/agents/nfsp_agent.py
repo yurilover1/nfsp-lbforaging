@@ -1,10 +1,7 @@
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import math
 import random
-import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import os
 from lbforaging.agents import BaseAgent

@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -24,7 +23,7 @@ class dueling_ddqn(nn.Module):
         self.advantage = nn.Sequential(
             nn.Linear(hidden_size, hidden_size//2),
             self._get_activation(activation, 0.1),
-            nn.Dropout(0.05),
+            # nn.Dropout(0.05),
             
             nn.Linear(hidden_size//2, action_size)
         )
@@ -33,7 +32,7 @@ class dueling_ddqn(nn.Module):
         self.value = nn.Sequential(
             nn.Linear(hidden_size, hidden_size//2),
             self._get_activation(activation, 0.1),
-            nn.Dropout(0.05),
+              #nn.Dropout(0.05),
             
             nn.Linear(hidden_size//2, 1)
         )

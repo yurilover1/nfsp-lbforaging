@@ -415,10 +415,10 @@ class ForagingEnv(gym.Env):
 
             self.field[row, col] = (
                 min_levels[food_count]
-                # if min_levels[food_count] == max_levels[food_count]
-                # else self.np_random.integers(
-                #     min_levels[food_count], max_levels[food_count] + 1
-                # )
+                if min_levels[food_count] == max_levels[food_count]
+                else self.np_random.integers(
+                    min_levels[food_count], max_levels[food_count] + 1
+                )
             )
             food_count += 1
         self._food_spawned = self.field.sum()
@@ -736,7 +736,6 @@ class ForagingEnv(gym.Env):
         return nobs, self._get_info()
 
     def step(self, actions):
-        self.current_step += 1
 
         for p in self.players:
             p.reward = 0
@@ -815,6 +814,10 @@ class ForagingEnv(gym.Env):
             # and the food is removed
             self.field[frow, fcol] = 0
 
+        for a in actions:
+            if a != Action.NONE:
+                self.current_step += 1
+
         self._game_over = (
             self.field.sum() == 0 or self._max_episode_steps <= self.current_step
         )
@@ -881,7 +884,9 @@ class ForagingEnv(gym.Env):
             time.sleep(sleep_time)
         
         # 逐步执行，直到回合结束
+        steps = 0
         while not done:
+            steps += 2
             # 收集动作
             actions = []
             for i, player in enumerate(self.players):
@@ -900,6 +905,7 @@ class ForagingEnv(gym.Env):
                 else:
                     # 如果没有控制器，随机选择动作
                     action = np.random.choice(valid_actions)
+                
                 # 检测重复动作模式
                 if self._repeated_actions_detected(action, actions_buffs[i]):
                     # 如果检测到重复，选择一个不同的随机动作
@@ -938,7 +944,7 @@ class ForagingEnv(gym.Env):
                 self.render()
                 time.sleep(sleep_time)
         
-        return trajectories, payoffs
+        return trajectories, payoffs, self.current_step
 
     def test_make_gym_obs(self):
         """Test wrapper to test the current observation in a public manner."""
