@@ -1,12 +1,13 @@
 from itertools import product
 
 from gymnasium import register
+from gymnasium.envs.registration import EnvSpec
 
 import sys
 import lbforaging.foraging as foraging
 sys.modules['foraging'] = foraging
 
-sizes = range(5, 20)
+sizes = range(3, 20)
 players = range(2, 10)
 foods = range(1, 10)
 max_food_level = [None]  # [None, 1]
@@ -29,6 +30,14 @@ for s, p, f, mfl, c, po, pen in product(
         "-pen" if pen else "",
     )
     
+    # 创建环境规格
+    spec = EnvSpec(
+        id=env_id,
+        entry_point="lbforaging.foraging:ForagingEnv",
+        max_episode_steps=None,  # 不在这里设置最大步数
+    )
+    
+    # 注册环境并提供参数
     register(
         id=env_id,
         entry_point="lbforaging.foraging:ForagingEnv",
@@ -41,26 +50,35 @@ for s, p, f, mfl, c, po, pen in product(
             "max_food_level": mfl,
             "max_num_food": f,
             "sight": 2 if po else s,
-            "max_episode_steps": 50,
+            "max_episode_steps": 50,  # 默认值作为环境参数传递
             "force_coop": c,
-            "grid_observation": False,  # 使用网格观测模式
+            "grid_observation": False,
             "penalty": 0.1 if pen else 0.0,
-            "three_layer_obs": False,  # 使用三层观测模式
+            "three_layer_obs": False,
         },
     )
 
 def register_grid_envs():
     for s, p, f, mfl, c in product(sizes, players, foods, max_food_level, coop):
         for sight in range(1, s + 1):
+            env_id = "Foraging-grid{4}-{0}x{0}-{1}p-{2}f{3}{5}-v3".format(
+                s,
+                p,
+                f,
+                "-coop" if c else "",
+                "" if sight == s else f"-{sight}s",
+                "-ind" if mfl else "",
+            )
+            
+            # 创建环境规格
+            spec = EnvSpec(
+                id=env_id,
+                entry_point="lbforaging.foraging:ForagingEnv",
+                max_episode_steps=None,  # 不在这里设置最大步数
+            )
+            
             register(
-                id="Foraging-grid{4}-{0}x{0}-{1}p-{2}f{3}{5}-v3".format(
-                    s,
-                    p,
-                    f,
-                    "-coop" if c else "",
-                    "" if sight == s else f"-{sight}s",
-                    "-ind" if mfl else "",
-                ),
+                id=env_id,
                 entry_point="lbforaging.foraging:ForagingEnv",
                 kwargs={
                     "players": p,
@@ -71,10 +89,9 @@ def register_grid_envs():
                     "max_food_level": mfl,
                     "max_num_food": f,
                     "sight": sight,
-                    "max_episode_steps": 50,
+                    "max_episode_steps": 50,  # 默认值作为环境参数传递
                     "force_coop": c,
-                    "grid_observation": False,  # 设置为False，使用三层观测模式
-                    "three_layer_obs": False,  # 明确启用三层观测模式
+                    "grid_observation": False,
+                    "three_layer_obs": False,
                 },
             )
-

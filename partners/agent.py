@@ -71,7 +71,7 @@ class SimpleAgent2(nn.Module):
         if isinstance(obs, np.ndarray):
             # 如果是3层观测格式 [3, 5, 5]，则需要展平
             if len(obs.shape) == 3:
-                obs = obs.reshape(-1)
+                obs = obs[0] * 1 + obs[1] * 2 + obs[2] * 3
             obs = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
         else:
             obs = torch.FloatTensor([obs]).unsqueeze(0).to(self.device)

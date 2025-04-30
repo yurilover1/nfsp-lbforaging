@@ -4,7 +4,10 @@ import gymnasium as gym
 import logging
 import lbforaging  # noqa
 from lbforaging.agents import NFSPAgent
-from utils import calculate_state_size, train_agents, test_agents
+from utils import calculate_state_size
+from train import train_agents
+from test import test_agents
+from evaluate import evaluate
 from partners.agent import SimpleAgent2
 import random
 
@@ -18,7 +21,7 @@ def main(args):
     
     # 设置环境和智能体
     render_mode = "human" if args.render else None
-    env = gym.make("Foraging-5x5-2p-2f-v3", 
+    env = gym.make("Foraging-5x5-2p-2f-v3", force_coop=args.force_coop,
                    render_mode=render_mode,  max_episode_steps=args.max_epi_steps)
     
     # 计算状态空间大小
@@ -83,7 +86,7 @@ def main(args):
         print("\n训练完成！\n")
     # 测试模式
     else:
-        # 使用utils中的test_agents函数进行测试
+        # 使用test模块中的test_agents函数进行测试
         test_results = test_agents(
             env,
             agents,
