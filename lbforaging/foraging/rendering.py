@@ -112,6 +112,7 @@ class Viewer(object):
         )
 
     def render(self, env, return_rgb_array=False):
+        os.environ['PYOPENGL_PLATFORM'] = 'egl'
         glClearColor(*_WHITE, 0)
         self.window.clear()
         self.window.switch_to()

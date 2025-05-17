@@ -61,20 +61,15 @@ def calculate_state_size(env):
         # 默认状态大小
         return 100
 
-def plot_training_curve(history, num_episodes, eval_interval, nfsp_agents=None):
-    """绘制训练曲线，包括四幅图：监督学习损失、策略准确率、强化学习损失和队伍总奖励"""
-    # 数据预处理部分 - 将所有数据处理逻辑放在绘图之前
-    
-    # 预处理变量初始化
-    smooth_losses = None
-    smooth_acc = None
-    smooth_rl = None
-    team_rewards = None
-    smooth_rewards = None
-    
-    # 只使用第一个NFSP智能体数据
-    if nfsp_agents and len(nfsp_agents) > 0:
-        agent = nfsp_agents[0]
+def plot_training_curve(history, num_episodes, eval_interval, main_agents=None, teamate_id=0, type='ppo'):
+    """绘制训练曲线，显示评估奖励随批次变化的趋势以反映模型收敛速度与性能"""
+    # 检查是否有评估数据
+    if 'eval_rewards' not in history or len(history['eval_rewards']) == 0:
+        print("没有评估数据，无法绘制评估曲线")
+        return
+     # 只使用第一个NFSP智能体数据
+    if main_agents and len(main_agents) > 0:
+        agent = main_agents[0]
         
         # 处理监督学习损失
         if len(agent.losses) > 0:
@@ -90,104 +85,51 @@ def plot_training_curve(history, num_episodes, eval_interval, nfsp_agents=None):
             if window_size > 1:
                 smooth_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
         
-        # 处理策略准确率
-        if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > 0:
-            accuracies = np.array(agent.policy_accuracies)
-            
-            # 降采样
-            if len(accuracies) > 1000:
-                step = len(accuracies) // 1000
-                accuracies = accuracies[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(accuracies))
-            if window_size > 1:
-                smooth_acc = np.convolve(accuracies, np.ones(window_size)/window_size, mode='valid')
-        
-        # 处理强化学习损失
-        if len(agent.RLlosses) > 0:
-            rl_losses = np.array(agent.RLlosses)
-            
-            # 降采样
-            if len(rl_losses) > 1000:
-                step = len(rl_losses) // 1000
-                rl_losses = rl_losses[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(rl_losses))
-            if window_size > 1:
-                smooth_rl = np.convolve(rl_losses, np.ones(window_size)/window_size, mode='valid')
-    
-    # 处理团队奖励数据
-    raw_rewards = history['episode_rewards']
-    if len(raw_rewards) > 0:
-        # 检查数据格式并转换为numpy数组
-        if isinstance(raw_rewards[0], (list, np.ndarray)):
-            # 多智能体情况，计算团队总奖励
-            rewards = np.array([reward for reward in raw_rewards])
-            team_rewards = rewards.sum(axis=1)
-            
-            # 平滑处理团队奖励
-            window_size = min(50, len(team_rewards) // 10)  # 使用更大的窗口来平滑奖励曲线
-            if window_size > 1:
-                smooth_rewards = np.convolve(team_rewards, np.ones(window_size)/window_size, mode='valid')
-        else:
-            # 单智能体情况
-            team_rewards = np.array(raw_rewards)
+    # 准备评估数据
+    eval_rewards = history['eval_rewards']
+    eval_batches = history['eval_batches']
     
     # 创建图形
-    plt.figure(figsize=(16, 16))
+    plt.figure(figsize=(12, 12))
+
+    plt.subplot(2, 1, 1)
+
+    plt.plot(smooth_losses, 'b-o', linewidth=2, label='smooth SL losses')
+    plt.title('Trends in assessment incentives by batch', fontsize=16)
+    plt.xlabel('batch', fontsize=14)
+    plt.ylabel('losses', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=12)
+
+    plt.subplot(2, 1, 2)
+    plt.plot(eval_batches, eval_rewards, 'r-o', linewidth=2, label='agent rewards')
     
-    # 1. 监督学习损失 (左上角)
-    plt.subplot(2, 2, 1)
-    if smooth_losses is not None:
-        plt.plot(smooth_losses, 'k-', linewidth=2, label='SL Loss')
-    plt.xlabel('Training Steps')
-    plt.ylabel('Loss')
-    plt.title('Supervised Learning Loss')
-    plt.grid(True)
-    plt.legend()
+    # 设置图表标题和标签
+    plt.title('Trends in assessment incentives by batch', fontsize=16)
+    plt.xlabel('batch', fontsize=14)
+    plt.ylabel('rewards', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=12)
     
-    # 2. 策略准确率 (右上角)
-    plt.subplot(2, 2, 2)
-    if smooth_acc is not None:
-        plt.plot(smooth_acc, 'k-', linewidth=2, label='Policy Accuracy')
-    plt.xlabel('Training Steps')
-    plt.ylabel('Accuracy')
-    plt.title('Policy Accuracy')
-    plt.grid(True)
-    plt.legend()
+    # 添加可选的平滑曲线（如果有足够的数据点）
+    if len(eval_batches) > 5:
+        # 使用简单的移动平均来平滑曲线
+        window_size = min(10, len(eval_batches) // 2)
+        if window_size > 1:
+            # 对单智能体奖励进行平滑处理
+            smooth_rewards = []
+            for i in range(len(eval_rewards) - window_size + 1):
+                smooth_rewards.append(np.mean(eval_rewards[i:i+window_size]))
+            
+            # 由于窗口平滑，x坐标需要调整
+            smooth_x = eval_batches[:len(smooth_rewards)]
+            plt.plot(smooth_x, smooth_rewards, 'b-', linewidth=2.5, 
+                     label='smooth rewards')
     
-    # 3. 强化学习损失 (左下角)
-    plt.subplot(2, 2, 3)
-    if smooth_rl is not None:
-        plt.plot(smooth_rl, 'k-', linewidth=2, label='RL Loss')
-    plt.xlabel('Training Steps')
-    plt.ylabel('Loss')
-    plt.title('Reinforcement Learning Loss')
-    plt.grid(True)
-    plt.legend()
-    
-    # 4. 队伍总奖励 (右下角)
-    plt.subplot(2, 2, 4)
-    if team_rewards is not None:
-        window_size = min(50, len(team_rewards) // 10)
-        # 画出原始数据（较浅的颜色）
-        plt.plot(np.arange(len(team_rewards)), team_rewards, 'b-', alpha=0.3, label='Raw Team Reward')
-        
-        # 如果有平滑数据，也画出平滑后的数据
-        if smooth_rewards is not None:
-            plt.plot(np.arange(len(smooth_rewards)) + window_size//2, smooth_rewards, 'b-', 
-                     linewidth=2, label='Smoothed Team Reward')
-    
-    plt.xlabel('Episodes')
-    plt.ylabel('Reward')
-    plt.title('Team Total Reward')
-    plt.grid(True)
-    plt.legend()
-    
+    # 保存图像
     plt.tight_layout()
-    plt.savefig('./results/training_curve.png')
+    plt.savefig(f'./results/eval_performance_curve_{teamate_id}_{type}.png')
+    print(f"评估性能曲线已保存至: ./results/eval_performance_curve_{teamate_id}_{type}.png")
     plt.close()
 
 def save_history(history, nfsp_agents):
@@ -199,12 +141,8 @@ def save_history(history, nfsp_agents):
     data_to_save = {
         'episode_rewards': history['episode_rewards'],
         'eval_rewards': history['eval_rewards'],
-        'eval_episodes': history['eval_episodes'],
+        'eval_batches': history['eval_batches'],
     }
-    
-    # 添加可利用度数据（如果存在）
-    if 'exploitability' in history and history['exploitability']:
-        data_to_save['exploitability'] = history['exploitability']
     
     # 添加监督学习损失
     if 'sl_losses' in history and history['sl_losses']:

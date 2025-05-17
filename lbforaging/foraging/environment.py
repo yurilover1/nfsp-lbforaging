@@ -817,6 +817,7 @@ class ForagingEnv(gym.Env):
         for a in actions:
             if a != Action.NONE:
                 self.current_step += 1
+                self.players[actions.index(a)].reward -= 0.01
 
         self._game_over = (
             self.field.sum() == 0 or self._max_episode_steps <= self.current_step

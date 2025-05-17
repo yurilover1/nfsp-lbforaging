@@ -86,9 +86,6 @@ class NFSPAgent(BaseAgent):
         self.losses = []  # SL损失
         self.RLlosses = []  # RL损失
         self.policy_accuracies = []  # 策略准确度记录
- 
-        # 设置matplotlib支持中文
-        rcParams['font.family'] = ['Microsoft YaHei']
         
         # 避免使用原始类中的use_raw属性
         self.use_raw = False
@@ -461,7 +458,7 @@ class NFSPAgent(BaseAgent):
             self.rl_train()
             self.sl_train()
     
-    def save_models(self, path="./models"):
+    def save_models(self,teamate_id=0, path="./models"):
         """保存模型"""
         # 确保网络已初始化
         if not hasattr(self, 'networks_initialized') or not self.networks_initialized:
@@ -469,7 +466,7 @@ class NFSPAgent(BaseAgent):
             return False
             
         os.makedirs(path, exist_ok=True)
-        player_id = self.player.level if hasattr(self.player, 'level') else "0"
+        player_id = teamate_id
         
         # 保存网络权重
         torch.save(self.rl_eval_network.state_dict(), f"{path}/nfsp_agent_{player_id}_q_network.pth")
@@ -526,12 +523,6 @@ class NFSPAgent(BaseAgent):
             import traceback
             traceback.print_exc()
             return False
-    
-    
-    def plot_losses(self):
-        """同时绘制SL和RL损失曲线"""
-        self.plot_SL_loss()
-        self.plot_RL_loss()
 
     def get_policy_accuracy_history(self):
         """获取策略准确率历史记录"""
