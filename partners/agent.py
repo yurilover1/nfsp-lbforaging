@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 
 class SimpleAgent2(nn.Module):
-    def __init__(self, input_dim, hidden_dims, output_dim, device='cpu'):
+    def __init__(self, input_dim: object, hidden_dims: object, output_dim: object, device: object = 'cpu') -> None:
         super(SimpleAgent2, self).__init__()
         self.device = device
         self.hidden_dims = hidden_dims
@@ -42,7 +42,7 @@ class SimpleAgent2(nn.Module):
             else:
                 act_dist = torch.distributions.Categorical(act_probs)  
                 actions = act_dist.sample()
-        return actions.detach().tolist(), act_probs.detach()
+        return actions.detach(), act_probs.detach()
     
     
     def load_model(self, path):
@@ -60,28 +60,18 @@ class SimpleAgent2(nn.Module):
             选择的动作
         """
         # 获取观测
-        obs = obs_dict['obs']
-        
+        obs = obs_dict['obs'] if isinstance(obs_dict, dict) else obs_dict
         # 处理观测
         if isinstance(obs, (list, tuple)):
             # 如果是元组，则取第一个元素（针对多智能体环境）
             obs = obs[0]
         
-        # 转换为Tensor
-        if isinstance(obs, np.ndarray):
-            # 如果是3层观测格式 [3, 5, 5]，则需要展平
-            if len(obs.shape) == 3:
-                obs = obs[0] * 1 + obs[1] * 2 + obs[2] * 3
-            obs = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-        else:
-            obs = torch.FloatTensor([obs]).unsqueeze(0).to(self.device)
-        
+        # 转换为Tensor（最高效的方式）
+        obs = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(self.device)
+
         # 选择动作
         action, _ = self.select_action(obs)
-        
-        # 确保返回标量动作
-        if isinstance(action, list) and len(action) == 1:
-            action = action[0]
+        action = int(action)
         
         return action
     

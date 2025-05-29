@@ -64,30 +64,29 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
             # 记录当前批次的奖励
             batch_rewards = []
             steps_list = []
+            agent = agents[0]
             
             # 处理当前批次中的每个回合
             for i in range(batch_size):
                 episode = batch * 100 + i
-                
-                # 在每个回合开始时选择策略模式（仅对NFSP智能体）
-                for agent in nfsp_agents:
-                    agent.choose_policy_mode()
 
                 # 判断是否需要在本回合渲染
                 should_render = render and episode % render_interval == 0
+
+                agent.select_policy_mode()
                 
                 if should_render:
                     print(f"\n渲染回合 {episode}...")
                    
                     # 运行一个完整回合，并渲染
-                    trajectories, payoffs, steps = env.run(agents, is_training=True, render=True, 
+                    _, payoffs, steps = env.run(agents, is_training=True, render=True, 
                                                            sleep_time=0.5)
                     # 暂停进度条更新
                     pbar.clear()
 
                 else:
                     # 正常训练，不渲染
-                    trajectories, payoffs, steps = env.run( agents, is_training=True, render=False)
+                    _, payoffs, steps = env.run(agents, is_training=True, render=False)
                 
                 # 记录每个回合的奖励
                 history['episode_rewards'].append(payoffs)
@@ -107,43 +106,10 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
                 })
                 pbar.update(1)
 
-                # 存储轨迹并训练
-                for j, agent in enumerate(nfsp_agents + ppo_agents):
-                    agent_idx = agents.index(agent)  # 找到当前NFSP智能体在agents列表中的索引
-                    for ts in trajectories[agent_idx]:
-                        if len(ts) > 0:
-                            # ts结构：[obs_dict, action, reward, next_obs_dict, done]
-                            # 首先获取预处理后的状态
-                            obs = agent._preprocess_state(ts[0])
-                            action = ts[1]
-                            reward = ts[2]
-                            next_obs = None if ts[4] else agent._preprocess_state(ts[3])
-                            done = ts[4]
-                            
-                            # 如果是终止状态，则使用当前状态作为下一状态
-                            if next_obs is None:
-                                next_obs = obs
-                            
-                            # 直接添加轨迹，_preprocess_state中会处理数据格式转换
-                            agent.add_traj([obs, action, reward, next_obs, done])
+                if episode % agent.train_freq == 0:
+                    agent.rl_train()
+                    agent.sl_train()
 
-                    agent.train()
-                
-                # 每10个回合保存损失和准确率
-                if episode % 10 == 0 and len(nfsp_agents) > 0:
-                    # 使用第一个NFSP智能体的损失数据
-                    agent = nfsp_agents[0]
-                    # 保存SL损失
-                    if len(agent.losses) > 0:
-                        history['sl_losses'].append(agent.losses[-1])
-                    # 保存RL损失
-                    if len(agent.RLlosses) > 0:
-                        history['rl_losses'].append(agent.RLlosses[-1])
-                    # 保存策略准确率
-                    if hasattr(agent, 'policy_accuracies') and len(agent.policy_accuracies) > 0:
-                        history['policy_accuracies'].append(agent.policy_accuracies[-1])
-
-            
             
             # 批次完成后显示平均奖励
             avg_reward = np.mean(recent_rewards)
@@ -155,7 +121,6 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
             # 打印批次完成信息（使用彩色文本和表情符号使其更明显）
             batch_summary = (f"✅ 批次 {batch+1}/{total_batches} 完成 | "
                              f"平均奖励: {avg_reward:.4f} | "
-                             f"用时: {elapsed_time:.1f}秒 | "
                              f"步数：{avg_steps} | "
                              f"总进度: {(batch+1)/total_batches*100:.1f}%")
             print(f"\033[92m{batch_summary}\033[0m\n")
@@ -182,7 +147,7 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
                 
                 # 打印评估结果
                 print(f"评估结果 (批次 {batch}):")
-                print(f"团队平均奖励: {np.mean(rewards):.4f}")
+                print(f"团队平均奖励: {np.sum(rewards):.4f}")
             print("-" * 50)
     
     print("\n训练完成！\n")
@@ -194,7 +159,7 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
     # 保存模型（PPO智能体）
     for i, agent in enumerate(ppo_agents):
         model_path = os.path.join("./models", f"ppo_agent_{teamate_id}_model.pt")
-        agent.save_model(model_path)
+        agent.save_models(model_path)
         print(f"PPO智能体模型已保存到 {model_path}")
     
     # 绘制训练曲线

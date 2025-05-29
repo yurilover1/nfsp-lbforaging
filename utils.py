@@ -71,19 +71,18 @@ def plot_training_curve(history, num_episodes, eval_interval, main_agents=None, 
     if main_agents and len(main_agents) > 0:
         agent = main_agents[0]
         
-        # 处理监督学习损失
-        if len(agent.losses) > 0:
-            losses = np.array(agent.losses)
+        # 处理强化学习损失
+        losses = np.array(agent.RLlosses) if type == 'nfsp' else np.array(agent.losses)
             
-            # 降采样
-            if len(losses) > 1000:
-                step = len(losses) // 1000
-                losses = losses[::step]
-            
-            # 平滑处理
-            window_size = min(20, len(losses))
-            if window_size > 1:
-                smooth_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+        # 降采样
+        if len(losses) > 1000:
+            step = len(losses) // 1000
+            losses = losses[::step]
+        
+        # 平滑处理
+        window_size = min(20, len(losses))
+        if window_size > 1:
+            smooth_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
         
     # 准备评估数据
     eval_rewards = history['eval_rewards']
@@ -94,7 +93,7 @@ def plot_training_curve(history, num_episodes, eval_interval, main_agents=None, 
 
     plt.subplot(2, 1, 1)
 
-    plt.plot(smooth_losses, 'b-o', linewidth=2, label='smooth SL losses')
+    plt.plot(smooth_losses, 'b-o', linewidth=2, label='smooth RL losses')
     plt.title('Trends in assessment incentives by batch', fontsize=16)
     plt.xlabel('batch', fontsize=14)
     plt.ylabel('losses', fontsize=14)
