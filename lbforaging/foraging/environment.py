@@ -963,7 +963,7 @@ class ForagingEnv(gym.Env):
                 if len(ts) > 0:
                     # ts结构：[obs_dict, action, reward, next_obs_dict, done]
                     # 添加轨迹(s_t, a_t, r_t, s_t+1)
-                    self.add_traj([ts[0], ts[1], ts[2],
+                    agents[0].add_traj([ts[0], ts[1], ts[2],
                                     ts[0] if ts[4] else ts[3], ts[4]])
             # 更新观察
             obss = next_obss

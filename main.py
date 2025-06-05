@@ -3,62 +3,14 @@ import argparse
 import gymnasium as gym
 import logging
 # import lbforaging  # noqa
-from agents.agent import BaseAgent
-from agents.nfsp_agent import NFSPAgent
-from agents.ppo_agent import PPOAgent
-from utils import calculate_state_size
+from utils import *
 from train import train_agents
 from test import test_agents
-from partners.agent import SimpleAgent2
-import random
 import torch
 
 
 logger = logging.getLogger(__name__)
 
-def teammate_generate(action_size, id=random.randint(0, 7)):
-    teammate_agent = SimpleAgent2(
-        input_dim=12,  # 使用正确的输入维度12而不是state_size
-        hidden_dims=[128, 128],
-        output_dim=action_size,
-        device=args.device
-    )
-    model_path = f'./partners/agents_for_5*5/agent_{id}_1.pt'
-    teammate_agent.load_model(model_path)
-
-    return teammate_agent
-
-def create_agent(args, state_size, action_size):
-    """创建指定类型的智能体"""
-    agent_dir = f"./models/agent0"
-    os.makedirs(agent_dir, exist_ok=True)
-        
-    if args.agent_type.lower() == "nfsp":
-        # 创建NFSP智能体
-        agent = NFSPAgent(
-            player=args.agent_player, 
-            state_size=state_size, action_size=action_size,
-            epsilon_init=0.4, epsilon_decay=30000,  epsilon_min=0.05,                
-            update_freq=200, sl_lr=0.0005, rl_lr=0.0001,                    
-            sl_buffer_size=10000, rl_buffer_size=20000,            
-            rl_start=300, sl_start=300, train_freq=4, gamma=0.99, eta=0.1,
-            rl_batch_size=128, sl_batch_size=256, hidden_units=256,                
-            layers=args.layers, device=args.device, eval_mode='best'
-        )
-        return agent
-    elif args.agent_type.lower() == "ppo":
-        # 创建PPO智能体``
-        agent = PPOAgent(
-            input_dim=12,  # 输入维度为12
-            hidden_dims=[128, 128],
-            output_dim=action_size,
-            device=args.device,
-            player=args.agent_player,  # 传递player信息,
-            lambda_=0.95, gamma=0.99
-        )
-        return agent
-    else:
-        raise ValueError(f"不支持的智能体类型: {args.agent_type}")
 
 def main(args):
     """主函数，训练并测试智能体"""
@@ -70,12 +22,15 @@ def main(args):
     env = gym.make("Foraging-5x5-2p-2f-v3", force_coop=args.force_coop, normalize_reward=False,
                    render_mode=render_mode, max_episode_steps=args.max_epi_steps)
     action_size = 6  # (NONE, NORTH, SOUTH, WEST, EAST, LOAD)
+
+    args.agent_player = env.players[0]
     
     # 创建智能体
     agents = []
     # 创建主智能体（可选NFSP或PPO）
-    agents.append(create_agent(args, calculate_state_size(env), action_size))
-    agents.append(teammate_generate(action_size, id=0))
+    agents.append(create_agent(args.agent_type, env.players,
+        calculate_state_size(env), action_size, args.layers, args.device))
+    agents.append(teammate_generate(action_size, id=0, device=args.device))
     
     # 训练模式
     if not args.test:

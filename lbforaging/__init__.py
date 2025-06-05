@@ -50,7 +50,7 @@ for s, p, f, mfl, c, po, pen in product(
             "max_food_level": mfl,
             "max_num_food": f,
             "sight": 2 if po else s,
-            "max_episode_steps": 50,  # 默认值作为环境参数传递
+            "max_episode_steps": 20,  # 默认值作为环境参数传递
             "force_coop": c,
             "grid_observation": False,
             "penalty": 0.1 if pen else 0.0,

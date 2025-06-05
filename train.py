@@ -73,7 +73,7 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
                 # 判断是否需要在本回合渲染
                 should_render = render and episode % render_interval == 0
 
-                agent.select_policy_mode()
+                agent.choose_policy_mode()
                 
                 if should_render:
                     print(f"\n渲染回合 {episode}...")
@@ -154,7 +154,7 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
     
     # 保存模型（NFSP智能体）
     for agent in nfsp_agents:
-        agent.save_models(teamate_id)
+        agent.save_models(teamate_id = teamate_id)
     
     # 保存模型（PPO智能体）
     for i, agent in enumerate(ppo_agents):
