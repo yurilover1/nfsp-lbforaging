@@ -4,6 +4,7 @@ from itertools import product
 import logging
 import time
 from typing import Iterable
+from math import exp as exp
 
 import gymnasium as gym
 from gymnasium.utils import seeding
@@ -98,9 +99,9 @@ class ForagingEnv(gym.Env):
         observe_agent_levels=True,
         penalty=0.0,
         render_mode=None,
-        three_layer_obs=False,  # 新增参数：是否使用三层观测模式
         step_reward_factor=0.1,  # 新增：胜利时步数奖励系数
-        distance_penalty_factor=0.05,  # 新增：失败时距离惩罚系数
+        distance_penalty_factor=0.1,  # 新增：失败时距离惩罚系数
+        attraction_reward_factor=0.1,  # 新增：吸引力奖励系数
     ):
         self.logger = logging.getLogger(__name__)
         self.render_mode = render_mode
@@ -110,13 +111,16 @@ class ForagingEnv(gym.Env):
 
         self.penalty = penalty
         
-        # 新增奖励调整参数
         self.step_reward_factor = step_reward_factor  # 胜利时步数奖励系数
         self.distance_penalty_factor = distance_penalty_factor  # 失败时距离惩罚系数
+        self.attraction_reward_factor = attraction_reward_factor  # 吸引力奖励系数
+        
+        # 新增：记录位置历史
+        self.agent_positions_history = []
+        self.food_positions_history = []
 
         # 观测模式设置
         self._grid_observation = grid_observation
-        self._three_layer_obs = three_layer_obs  # 是否使用三层观测模式
 
         if isinstance(min_food_level, Iterable):
             assert (
@@ -199,11 +203,13 @@ class ForagingEnv(gym.Env):
         if seed is not None:
             self._np_random, seed = seeding.np_random(seed)
 
+    #==============================
+    # 观察空间和信息
+    #==============================
+    
     def _get_observation_space(self):
         """获取每个智能体的观测空间"""
-        if self._three_layer_obs:
-            return self._get_three_layer_observation_space()
-        elif self._grid_observation:
+        if self._grid_observation:
             return self._get_grid_observation_space()
         else:
             return self._get_vector_observation_space()
@@ -256,27 +262,6 @@ class ForagingEnv(gym.Env):
         
         return gym.spaces.Box(low=min_obs, high=max_obs, dtype=np.float32)
 
-    def _get_three_layer_observation_space(self):
-        """获取三层观测空间 - 5x5视野内的三层观测(自身、其他智能体、食物)"""
-        grid_shape = (5, 5)
-        max_food_level = self._get_max_food_level()
-        max_agent_level = max(self.max_player_level) if self._observe_agent_levels else 1
-        
-        # 三层：自身智能体层、其他智能体层、食物层
-        min_obs = np.stack([
-            np.zeros(grid_shape, dtype=np.float32),  # 自身智能体层
-            np.zeros(grid_shape, dtype=np.float32),  # 其他智能体层
-            np.zeros(grid_shape, dtype=np.float32),  # 食物层
-        ])
-        
-        max_obs = np.stack([
-            np.ones(grid_shape, dtype=np.float32) * max_agent_level,
-            np.ones(grid_shape, dtype=np.float32) * max_agent_level,
-            np.ones(grid_shape, dtype=np.float32) * max_food_level,
-        ])
-        
-        return gym.spaces.Box(low=min_obs, high=max_obs, dtype=np.float32)
-
     def _get_max_food_level(self):
         """获取最大食物等级"""
         if self.max_food_level is not None:
@@ -287,9 +272,7 @@ class ForagingEnv(gym.Env):
 
     def _make_gym_obs(self):
         """生成Gym格式的观测"""
-        if self._three_layer_obs:
-            return self._make_three_layer_observations()
-        elif self._grid_observation:
+        if self._grid_observation:
             return self._make_grid_observations()
         else:
             return self._make_vector_observations()
@@ -298,7 +281,6 @@ class ForagingEnv(gym.Env):
         """生成向量观测"""
         observations = [self._make_obs(player) for player in self.players]
         nobs = tuple([self._observation_to_vector(obs) for obs in observations])
-        self._validate_observations(nobs)
         return nobs
 
     def _make_grid_observations(self):
@@ -311,19 +293,6 @@ class ForagingEnv(gym.Env):
             nobs.append(agent_obs)
         
         nobs = tuple(nobs)
-        self._validate_observations(nobs)
-        return nobs
-
-    def _make_three_layer_observations(self):
-        """生成三层观测"""
-        nobs = []
-        
-        for current_player in self.players:
-            agent_obs = self._create_three_layer_view(current_player)
-            nobs.append(agent_obs)
-        
-        nobs = tuple(nobs)
-        self._validate_observations(nobs)
         return nobs
 
     def _observation_to_vector(self, observation):
@@ -372,6 +341,54 @@ class ForagingEnv(gym.Env):
                 obs[base_idx:base_idx + 2] = player.position
                 if self._observe_agent_levels:
                     obs[base_idx + 2] = player.level
+    
+    def _make_obs(self, player):
+        """为特定玩家创建观察对象"""
+        return self.Observation(
+            actions=self._valid_actions[player],
+            players=[
+                self.PlayerObservation(
+                    position=self._transform_to_neighborhood(
+                        player.position, self.sight, a.position
+                    ),
+                    level=a.level,
+                    is_self=a == player,
+                    history=a.history,
+                    reward=a.reward if a == player else None,
+                )
+                for a in self.players
+                if (
+                    min(
+                        self._transform_to_neighborhood(
+                            player.position, self.sight, a.position
+                        )
+                    )
+                    >= 0
+                )
+                and max(
+                    self._transform_to_neighborhood(
+                        player.position, self.sight, a.position
+                    )
+                )
+                <= 2 * self.sight
+            ],
+            # todo also check max?
+            field=np.copy(self.neighborhood(*player.position, self.sight)),
+            game_over=self.game_over,
+            sight=self.sight,
+            current_step=self.current_step,
+        )
+        
+    def _transform_to_neighborhood(self, center, sight, position):
+        """将全局坐标转换为相对于中心的局部坐标"""
+        return (
+            position[0] - center[0] + min(sight, center[0]),
+            position[1] - center[1] + min(sight, center[1]),
+        )
+
+    #==============================
+    # 网格观察辅助方法
+    #==============================
 
     def _create_global_grid_layers(self):
         """创建全局网格层"""
@@ -447,59 +464,10 @@ class ForagingEnv(gym.Env):
         
         # 将自身识别层加入观测
         return np.concatenate([agent_view, self_layer[np.newaxis, :, :]], axis=0)
-
-    def _create_three_layer_view(self, current_player):
-        """为指定智能体创建三层视野观测"""
-        grid_size = 5
-        grid_shape = (grid_size, grid_size)
         
-        # 初始化三个层
-        self_layer = np.zeros(grid_shape, dtype=np.float32)
-        other_agents_layer = np.zeros(grid_shape, dtype=np.float32)
-        food_layer = np.zeros(grid_shape, dtype=np.float32)
-        
-        center_x, center_y = current_player.position
-        
-        # 遍历5x5视野区域
-        for dx in range(-2, 3):
-            for dy in range(-2, 3):
-                abs_x = center_x + dx
-                abs_y = center_y + dy
-                grid_x = dx + 2
-                grid_y = dy + 2
-                
-                # 检查是否在场景内
-                if 0 <= abs_x < self.rows and 0 <= abs_y < self.cols:
-                    self._fill_three_layer_cell(
-                        current_player, abs_x, abs_y, grid_x, grid_y,
-                        self_layer, other_agents_layer, food_layer
-                    )
-        
-        return np.stack([self_layer, other_agents_layer, food_layer])
-
-    def _fill_three_layer_cell(self, current_player, abs_x, abs_y, grid_x, grid_y,
-                              self_layer, other_agents_layer, food_layer):
-        """填充三层观测中的单个格子"""
-        # 检查是否为当前智能体
-        if abs_x == current_player.position[0] and abs_y == current_player.position[1]:
-            value = current_player.level if self._observe_agent_levels else 1
-            self_layer[grid_x, grid_y] = value
-        
-        # 检查是否有其他智能体
-        for player in self.players:
-            if player != current_player and player.position == (abs_x, abs_y):
-                value = player.level if self._observe_agent_levels else 1
-                other_agents_layer[grid_x, grid_y] = value
-        
-        # 检查是否有食物
-        if self.field[abs_x, abs_y] > 0:
-            food_layer[grid_x, grid_y] = self.field[abs_x, abs_y]
-
-    def _validate_observations(self, nobs):
-        """验证观测是否符合观测空间"""
-        for i, obs in enumerate(nobs):
-            assert self.observation_space[i].contains(obs), \
-                f"观测空间错误: obs: {obs.shape}, obs_space: {self.observation_space[i]}"
+    #==============================
+    # 属性和状态访问
+    #==============================
 
     @property
     def field_size(self):
@@ -517,148 +485,21 @@ class ForagingEnv(gym.Env):
     def game_over(self):
         return self._game_over
 
+    #==============================
+    # 环境位置和交互辅助方法
+    #==============================
+    
     def _gen_valid_moves(self):
+        """计算每个玩家的有效动作集合"""
         self._valid_actions = {
             player: [
                 action for action in Action if self._is_valid_action(player, action)
             ]
             for player in self.players
         }
-
-    def neighborhood(self, row, col, distance=1, ignore_diag=False):
-        if not ignore_diag:
-            return self.field[
-                max(row - distance, 0) : min(row + distance + 1, self.rows),
-                max(col - distance, 0) : min(col + distance + 1, self.cols),
-            ]
-
-        return (
-            self.field[
-                max(row - distance, 0) : min(row + distance + 1, self.rows), col
-            ].sum()
-            + self.field[
-                row, max(col - distance, 0) : min(col + distance + 1, self.cols)
-            ].sum()
-        )
-
-    def adjacent_food(self, row, col):
-        return (
-            self.field[max(row - 1, 0), col]
-            + self.field[min(row + 1, self.rows - 1), col]
-            + self.field[row, max(col - 1, 0)]
-            + self.field[row, min(col + 1, self.cols - 1)]
-        )
-
-    def adjacent_food_location(self, row, col):
-        if row > 1 and self.field[row - 1, col] > 0:
-            return row - 1, col
-        elif row < self.rows - 1 and self.field[row + 1, col] > 0:
-            return row + 1, col
-        elif col > 1 and self.field[row, col - 1] > 0:
-            return row, col - 1
-        elif col < self.cols - 1 and self.field[row, col + 1] > 0:
-            return row, col + 1
-
-    def adjacent_players(self, row, col):
-        return [
-            player
-            for player in self.players
-            if abs(player.position[0] - row) == 1
-            and player.position[1] == col
-            or abs(player.position[1] - col) == 1
-            and player.position[0] == row
-        ]
-
-    def _distance_to_nearest_food(self, player_position):
-        """
-        计算智能体到最近食物的曼哈顿距离
         
-        参数:
-            player_position: 智能体位置 (row, col)
-            
-        返回:
-            int: 到最近食物的曼哈顿距离，如果没有食物返回场地对角线长度
-        """
-        food_positions = np.argwhere(self.field > 0)
-        
-        if len(food_positions) == 0:
-            # 如果没有食物，返回场地对角线长度作为最大距离
-            return self.rows + self.cols
-        
-        # 计算到所有食物的曼哈顿距离
-        distances = []
-        for food_pos in food_positions:
-            distance = abs(player_position[0] - food_pos[0]) + abs(player_position[1] - food_pos[1])
-            distances.append(distance)
-        
-        return min(distances)
-
-    def spawn_food(self, max_num_food, min_levels, max_levels):
-        food_count = 0
-        attempts = 0
-        min_levels = max_levels if self.force_coop else min_levels
-
-        # permute food levels
-        food_permutation = self.np_random.permutation(max_num_food)
-        min_levels = min_levels[food_permutation]
-        max_levels = max_levels[food_permutation]
-
-        while food_count < max_num_food and attempts < 1000:
-            attempts += 1
-            row = self.np_random.integers(1, self.rows - 1)
-            col = self.np_random.integers(1, self.cols - 1)
-
-            # check if it has neighbors:
-            if (
-                self.neighborhood(row, col).sum() > 0
-                or self.neighborhood(row, col, distance=2, ignore_diag=True) > 0
-                or not self._is_empty_location(row, col)
-            ):
-                continue
-
-            self.field[row, col] = (
-                min_levels[food_count]
-                if min_levels[food_count] == max_levels[food_count]
-                else self.np_random.integers(
-                    min_levels[food_count], max_levels[food_count] + 1
-                )
-            )
-            food_count += 1
-        self._food_spawned = self.field.sum()
-
-    def _is_empty_location(self, row, col):
-        if self.field[row, col] != 0:
-            return False
-        for a in self.players:
-            if a.position and row == a.position[0] and col == a.position[1]:
-                return False
-
-        return True
-
-    def spawn_players(self, min_player_levels, max_player_levels):
-        # permute player levels
-        player_permutation = self.np_random.permutation(len(self.players))
-        min_player_levels = min_player_levels[player_permutation]
-        max_player_levels = max_player_levels[player_permutation]
-        for player, min_player_level, max_player_level in zip(
-            self.players, min_player_levels, max_player_levels
-        ):
-            attempts = 0
-            player.reward = 0
-
-            while attempts < 1000:
-                row = self.np_random.integers(0, self.rows)
-                col = self.np_random.integers(0, self.cols)
-                if self._is_empty_location(row, col):
-                    player.setup(
-                        (row, col),
-                        self.np_random.integers(min_player_level, max_player_level + 1),
-                        self.field_size,
-                    )
-                    break
-                attempts += 1
-
     def _is_valid_action(self, player, action):
+        """检查特定动作对于玩家是否有效"""
         if action == Action.NONE:
             return True
         elif action == Action.NORTH:
@@ -687,55 +528,158 @@ class ForagingEnv(gym.Env):
         self.logger.error("Undefined action {} from {}".format(action, player.name))
         raise ValueError("Undefined action")
 
-    def _transform_to_neighborhood(self, center, sight, position):
+    def neighborhood(self, row, col, distance=1, ignore_diag=False):
+        """获取指定位置周围的区域"""
+        if not ignore_diag:
+            return self.field[
+                max(row - distance, 0) : min(row + distance + 1, self.rows),
+                max(col - distance, 0) : min(col + distance + 1, self.cols),
+            ]
+
         return (
-            position[0] - center[0] + min(sight, center[0]),
-            position[1] - center[1] + min(sight, center[1]),
+            self.field[
+                max(row - distance, 0) : min(row + distance + 1, self.rows), col
+            ].sum()
+            + self.field[
+                row, max(col - distance, 0) : min(col + distance + 1, self.cols)
+            ].sum()
         )
 
+    def adjacent_food(self, row, col):
+        """获取相邻位置的食物总量"""
+        return (
+            self.field[max(row - 1, 0), col]
+            + self.field[min(row + 1, self.rows - 1), col]
+            + self.field[row, max(col - 1, 0)]
+            + self.field[row, min(col + 1, self.cols - 1)]
+        )
+
+    def adjacent_food_location(self, row, col):
+        """获取相邻食物的位置"""
+        if row > 1 and self.field[row - 1, col] > 0:
+            return row - 1, col
+        elif row < self.rows - 1 and self.field[row + 1, col] > 0:
+            return row + 1, col
+        elif col > 1 and self.field[row, col - 1] > 0:
+            return row, col - 1
+        elif col < self.cols - 1 and self.field[row, col + 1] > 0:
+            return row, col + 1
+
+    def adjacent_players(self, row, col):
+        """获取相邻位置的所有玩家"""
+        return [
+            player
+            for player in self.players
+            if abs(player.position[0] - row) == 1
+            and player.position[1] == col
+            or abs(player.position[1] - col) == 1
+            and player.position[0] == row
+        ]
+        
     def get_valid_actions(self) -> list:
+        """获取所有智能体可能的联合动作组合"""
         return list(product(*[self._valid_actions[player] for player in self.players]))
 
-    def _make_obs(self, player):
-        return self.Observation(
-            actions=self._valid_actions[player],
-            players=[
-                self.PlayerObservation(
-                    position=self._transform_to_neighborhood(
-                        player.position, self.sight, a.position
-                    ),
-                    level=a.level,
-                    is_self=a == player,
-                    history=a.history,
-                    reward=a.reward if a == player else None,
-                )
-                for a in self.players
-                if (
-                    min(
-                        self._transform_to_neighborhood(
-                            player.position, self.sight, a.position
-                        )
+    def _is_empty_location(self, row, col):
+        """检查指定位置是否为空"""
+        if self.field[row, col] != 0:
+            return False
+        for a in self.players:
+            if a.position and row == a.position[0] and col == a.position[1]:
+                return False
+
+        return True
+
+    def _distance_to_nearest_food(self, player_position):
+        """
+        计算智能体到最近食物的曼哈顿距离
+        
+        参数:
+            player_position: 智能体位置 (row, col)
+            
+        返回:
+            int: 到最近食物的曼哈顿距离，如果没有食物返回场地对角线长度
+        """
+        food_positions = np.argwhere(self.field > 0)
+        
+        if len(food_positions) == 0:
+            # 如果没有食物，返回场地对角线长度作为最大距离
+            return self.rows + self.cols
+        
+        # 计算到所有食物的曼哈顿距离
+        distances = []
+        for food_pos in food_positions:
+            distance = abs(player_position[0] - food_pos[0]) + abs(player_position[1] - food_pos[1])
+            distances.append(distance)
+        
+        return min(distances)
+
+    def spawn_food(self, max_num_food, min_levels, max_levels):
+        """生成食物到环境中"""
+        food_count = 0
+        attempts = 0
+        min_levels = max_levels if self.force_coop else min_levels
+
+        # permute food levels
+        food_permutation = self.np_random.permutation(max_num_food)
+        min_levels = min_levels[food_permutation]
+        max_levels = max_levels[food_permutation]
+
+        while food_count < max_num_food and attempts < 1000:
+            attempts += 1
+            row = self.np_random.integers(1, self.rows - 1)
+            col = self.np_random.integers(1, self.cols - 1)
+
+            # check if it has neighbors:
+            if (
+                self.neighborhood(row, col).sum() > 0
+                or self.neighborhood(row, col, distance=2, ignore_diag=True) > 0
+                or not self._is_empty_location(row, col)
+            ):
+                continue
+
+            self.field[row, col] = (
+                min_levels[food_count]
+                if min_levels[food_count] == max_levels[food_count]
+                else self.np_random.integers(
+                    min_levels[food_count], max_levels[food_count] + 1
+                ))
+            food_count += 1
+        self._food_spawned = self.field.sum()
+
+    def spawn_players(self, min_player_levels, max_player_levels):
+        """生成玩家到环境中"""
+        # permute player levels
+        player_permutation = self.np_random.permutation(len(self.players))
+        min_player_levels = min_player_levels[player_permutation]
+        max_player_levels = max_player_levels[player_permutation]
+        for player, min_player_level, max_player_level in zip(
+            self.players, min_player_levels, max_player_levels
+        ):
+            attempts = 0
+            player.reward = 0
+
+            while attempts < 1000:
+                row = self.np_random.integers(0, self.rows)
+                col = self.np_random.integers(0, self.cols)
+                if self._is_empty_location(row, col):
+                    player.setup(
+                        (row, col),
+                        self.np_random.integers(min_player_level, max_player_level + 1),
+                        self.field_size,
                     )
-                    >= 0
-                )
-                and max(
-                    self._transform_to_neighborhood(
-                        player.position, self.sight, a.position
-                    )
-                )
-                <= 2 * self.sight
-            ],
-            # todo also check max?
-            field=np.copy(self.neighborhood(*player.position, self.sight)),
-            game_over=self.game_over,
-            sight=self.sight,
-            current_step=self.current_step,
-        )
+                    break
+                attempts += 1
 
     def _get_info(self):
         return {}
 
+    #==============================
+    # 环境主要交互方法
+    #==============================
+    
     def reset(self, seed=None, options=None):
+        """重置环境到初始状态"""
         if seed is not None:
             # setting seed
             super().reset(seed=seed, options=options)
@@ -759,121 +703,75 @@ class ForagingEnv(gym.Env):
         return nobs, self._get_info()
 
     def step(self, actions):
-
+        """
+        执行环境中的一个时间步骤，处理所有智能体的动作
+        
+        步骤流程:
+        1. 重置奖励
+        2. 验证和修正动作
+        3. 计算移动意图和碰撞
+        4. 执行非冲突的移动
+        5. 处理食物加载行为
+        6. 更新环境状态和奖励分配
+        
+        参数:
+            actions: 每个智能体的动作列表
+            
+        返回:
+            observations: 更新后的观察
+            rewards: 每个智能体获得的奖励
+            done: 回合是否结束
+            truncated: 是否因为超时而截断
+            info: 额外信息
+        """
+        # 1. 重置所有智能体的奖励
         for p in self.players:
             p.reward = 0
-
-        actions = [
-            Action(a) if Action(a) in self._valid_actions[p] else Action.NONE
-            for p, a in zip(self.players, actions)
-        ]
-
-        # check if actions are valid
-        for i, (player, action) in enumerate(zip(self.players, actions)):
-            if action not in self._valid_actions[player]:
-                self.logger.info(
-                    "{}{} attempted invalid action {}.".format(
-                        player.name, player.position, action
-                    )
-                )
-                actions[i] = Action.NONE
-
-        loading_players = set()
-
-        # move players
-        # if two or more players try to move to the same location they all fail
-        collisions = defaultdict(list)
-
-        # so check for collisions
-        for player, action in zip(self.players, actions):
-            if action == Action.NONE:
-                collisions[player.position].append(player)
-            elif action == Action.NORTH:
-                collisions[(player.position[0] - 1, player.position[1])].append(player)
-            elif action == Action.SOUTH:
-                collisions[(player.position[0] + 1, player.position[1])].append(player)
-            elif action == Action.WEST:
-                collisions[(player.position[0], player.position[1] - 1)].append(player)
-            elif action == Action.EAST:
-                collisions[(player.position[0], player.position[1] + 1)].append(player)
-            elif action == Action.LOAD:
-                collisions[player.position].append(player)
-                loading_players.add(player)
-
-        # and do movements for non colliding players
-        for k, v in collisions.items():
-            if len(v) > 1:  # make sure no more than an player will arrive at location
-                continue
-            v[0].position = k
-
-        # finally process the loadings:
-        while loading_players:
-            # find adjacent food
-            player = loading_players.pop()
-            frow, fcol = self.adjacent_food_location(*player.position)
-            food = self.field[frow, fcol]
-
-            adj_players = self.adjacent_players(frow, fcol)
-            adj_players = [
-                p for p in adj_players if p in loading_players or p is player
-            ]
-
-            adj_player_level = sum([a.level for a in adj_players])
-            loading_players = loading_players - set(adj_players)
-
-            if adj_player_level < food:
-                # failed to load
-                for a in adj_players:
-                    a.reward -= self.penalty
-                continue
-
-            # else the food was loaded and each player scores points
-            for a in adj_players:
-                a.reward = float(a.level * food)
-                if self._normalize_reward:
-                    a.reward = a.reward / float(
-                        adj_player_level * self._food_spawned
-                    )  # normalize reward
-            # and the food is removed
-            self.field[frow, fcol] = 0
-
+        # 新增：记录位置历史
+        self.agent_positions_history.append(self.players[0].position)
+        self.food_positions_history.append(np.argwhere(self.field > 0))
+            
+        # 2. 验证和修正动作
+        actions = self._validate_actions(actions)
+            
+        # 3. 计算移动意图和可能的碰撞
+        collisions, loading_players = self._process_movements(actions)
+            
+        # 4. 执行非冲突的移动
+        for position, players in collisions.items():
+            if len(players) == 1:  # 只有一个智能体移动到该位置
+                players[0].position = position
+                
+        # 5. 处理食物加载行为
+        loaded_foods = self._process_loading(loading_players)
+            
+        # 6. 更新环境状态
+        # 增加环境步数
         self.current_step += 2
-
+        
+        # 检查游戏是否结束
         self._game_over = (
             self.field.sum() == 0 or self._max_episode_steps <= self.current_step
         )
+        
+        # 更新有效动作
         self._gen_valid_moves()
-
-        # 游戏结束时对不做归一化的奖励作调整
-        if self._game_over and not self._normalize_reward:
-            self._apply_final_reward_adjustments()
-
+        
+        # 7. 统一处理所有奖励分配（包括基础奖励和终局奖励）
+        self._apply_reward_distribution(loaded_foods)
+            
+        # 累计奖励到总分
         for p in self.players:
             p.score += p.reward
-
+            
+        # 准备返回值
         rewards = [p.reward for p in self.players]
         done = self._game_over
         truncated = False
         info = self._get_info()
-
+        
         return self._make_gym_obs(), rewards, done, truncated, info
-
-    def _init_render(self):
-        from .rendering import Viewer
-
-        self.viewer = Viewer((self.rows, self.cols))
-        self._rendering_initialized = True
-
-    def render(self):
-        if not self._rendering_initialized:
-            self._init_render()
-
-        return self.viewer.render(self, return_rgb_array=self.render_mode == "rgb_array")
-
-    def close(self):
-        if self.viewer:
-            self.viewer.close()
-
+        
     def run(self, agents=None, is_training=False, render=False, sleep_time=0.5):
         """
         运行完整的回合，由agents控制行动选择
@@ -914,13 +812,15 @@ class ForagingEnv(gym.Env):
             steps += 2
             # 收集动作
             actions = []
+            valid_actions = [[], []]
+
             for i, player in enumerate(self.players):
                 # 提取有效动作
-                valid_actions = [action.value for action in self._valid_actions[player]]
+                valid_actions[i] = [action.value for action in self._valid_actions[player]]
                 
                 # 构建observation字典 - 支持网格观察和非网格观察模式
                 obs_dict = {
-                    'obs': obss[i], 'actions': valid_actions  # 使用实际有效的动作，不是所有动作
+                    'obs': obss[i], 'actions': valid_actions[i]  # 使用实际有效的动作，不是所有动作
                 }
                 
                 # 让智能体选择动作
@@ -931,7 +831,7 @@ class ForagingEnv(gym.Env):
                 if self._repeated_actions_detected(action, actions_buffs[i]):
                     # 如果检测到重复，选择一个不同的随机动作
                     other_valid_actions = \
-                        [a for a in valid_actions if a != action]
+                        [a for a in valid_actions[i] if a != action]
                     if other_valid_actions:  # 确保有其他有效动作可选
                         action = np.random.choice(other_valid_actions)
                 # 记录动作到缓冲区
@@ -946,33 +846,165 @@ class ForagingEnv(gym.Env):
             
             # 记录每个智能体的轨迹
             for i in range(len(self.players)):
-                next_valid_actions = [action.value for action in
-                                      self._valid_actions[self.players[i]]]
                 
-                # 轨迹格式：[obs_dict, action, reward, next_obs_dict, done]
                 trajectory_segment = [
-                    {'obs': obss[i], 'actions': valid_actions},  # 当前观察和有效动作
+                    obss[i],  # 当前观察和有效动作
                     actions[i],
-                    rewards[i],
-                    {'obs': next_obss[i], 'actions': next_valid_actions},  # 下一观察和有效动作
+                    next_obss[i],  # 下一观察和有效动作
                     done
                 ]
                 trajectories[i].append(trajectory_segment)
 
-            for ts in trajectories[0]:  #ts为局中智能体每次行动的轨迹
-                if len(ts) > 0:
-                    # ts结构：[obs_dict, action, reward, next_obs_dict, done]
-                    # 添加轨迹(s_t, a_t, r_t, s_t+1)
-                    agents[0].add_traj([ts[0], ts[1], ts[2],
-                                    ts[0] if ts[4] else ts[3], ts[4]])
-            # 更新观察
             obss = next_obss
-            
+
+
             if render:
                 self.render()
                 time.sleep(sleep_time)
+
+        for ts in trajectories[0]:  #ts为局中智能体每次行动的轨迹
+           if len(ts) > 0:
+               # ts结构：[obs_dict, action, next_obs_dict, done]
+               # 添加轨迹(s_t, a_t, r_t, s_t+1)
+               agents[0].add_traj2buffer([ts[0], ts[1], payoffs[0],
+                               ts[0] if ts[3] else ts[2], ts[3]])
+            
+            
         
         return trajectories, payoffs, self.current_step
+        
+    #==============================
+    # Step函数辅助方法
+    #==============================
+        
+    def _validate_actions(self, actions):
+        """验证并处理智能体的动作"""
+        # 转换动作到Action枚举类型，无效则设为NONE
+        valid_actions = [
+            Action(a) if Action(a) in self._valid_actions[p] else Action.NONE
+            for p, a in zip(self.players, actions)
+        ]
+        
+        # 记录无效动作
+        for i, (player, action) in enumerate(zip(self.players, valid_actions)):
+            if action not in self._valid_actions[player]:
+                self.logger.info(
+                    "{}{} attempted invalid action {}.".format(
+                        player.name, player.position, action
+                    )
+                )
+                valid_actions[i] = Action.NONE
+                
+        return valid_actions
+        
+    def _process_movements(self, actions):
+        """处理智能体的移动意图，返回可能的碰撞和加载行为"""
+        # 收集每个位置的智能体（用于检测碰撞）
+        collisions = defaultdict(list)
+        # 收集尝试加载食物的智能体
+        loading_players = set()
+        
+        # 处理每个智能体的动作
+        for player, action in zip(self.players, actions):
+            target_pos = player.position  # 默认位置（不移动）
+            
+            # 根据动作计算目标位置
+            if action == Action.NORTH:
+                target_pos = (player.position[0] - 1, player.position[1])
+            elif action == Action.SOUTH:
+                target_pos = (player.position[0] + 1, player.position[1])
+            elif action == Action.WEST:
+                target_pos = (player.position[0], player.position[1] - 1)
+            elif action == Action.EAST:
+                target_pos = (player.position[0], player.position[1] + 1)
+            elif action == Action.LOAD:
+                loading_players.add(player)
+            
+            # 记录目标位置的智能体
+            collisions[target_pos].append(player)
+            
+        return collisions, loading_players
+        
+    def _process_loading(self, loading_players):
+        """处理食物加载行为，仅处理食物移除，不分配奖励"""
+        # 复制一份避免修改迭代中的集合
+        players_to_process = set(loading_players)
+        
+        loaded_foods = []
+        while players_to_process:
+            # 取出一个正在加载的智能体
+            player = players_to_process.pop()
+            
+            # 查找相邻的食物
+            food_pos = self.adjacent_food_location(*player.position)
+            if food_pos is None:  # 确保有相邻食物
+                continue
+                
+            frow, fcol = food_pos
+            food_level = self.field[frow, fcol]
+            
+            # 查找协作的智能体（也在加载同一个食物的智能体）
+            adj_players = self.adjacent_players(frow, fcol)
+            adj_players = [p for p in adj_players if p in players_to_process or p is player]
+            
+            # 计算协作智能体的总等级
+            total_level = sum(a.level for a in adj_players)
+            
+            # 从待处理集合中移除这些智能体
+            players_to_process = players_to_process - set(adj_players)
+            
+            # 检查是否能成功加载食物
+            if total_level < food_level:
+                # 加载失败 - 记录失败信息
+                for a in adj_players:
+                    loaded_foods.append({
+                        'success': False,
+                        'player': a,
+                        'food_pos': food_pos,
+                        'food_level': food_level,
+                        'total_level': total_level,
+                        'cooperating_players': adj_players.copy()
+                    })
+                continue
+            
+            # 加载成功 - 记录成功信息并移除食物
+            for a in adj_players:
+                loaded_foods.append({
+                    'success': True,
+                    'player': a,
+                    'food_pos': food_pos,
+                    'food_level': food_level,
+                    'total_level': total_level,
+                    'cooperating_players': adj_players.copy()
+                })
+            
+            # 移除已加载的食物
+            self.field[frow, fcol] = 0
+         
+        return loaded_foods
+
+    #==============================
+    # 渲染方法
+    #==============================
+    
+    def _init_render(self):
+        """初始化渲染环境"""
+        from .rendering import Viewer
+
+        self.viewer = Viewer((self.rows, self.cols))
+        self._rendering_initialized = True
+
+    def render(self):
+        """渲染当前环境状态"""
+        if not self._rendering_initialized:
+            self._init_render()
+
+        return self.viewer.render(self, return_rgb_array=self.render_mode == "rgb_array")
+
+    def close(self):
+        """关闭渲染资源"""
+        if self.viewer:
+            self.viewer.close()
 
     def test_make_gym_obs(self):
         """Test wrapper to test the current observation in a public manner."""
@@ -1066,6 +1098,50 @@ class ForagingEnv(gym.Env):
                     
         return False
 
+    #==============================
+    # 奖励调整机制
+    #==============================
+    
+    def _apply_reward_distribution(self, loaded_foods):
+        """
+        统一处理所有奖励分配，包括基础奖励和终局奖励调整
+        
+        参数:
+            loading_players: 尝试加载食物的智能体集合
+            loaded_foods: 食物加载结果列表，包含成功和失败的信息
+        """
+        # 1. 分配基础奖励（加载食物的奖励和惩罚）
+        self._apply_loading_rewards(loaded_foods)
+        
+        # 2. 应用终局奖励调整（如果游戏结束且不使用奖励标准化）
+        if self._game_over:
+            attraction_reward = self.calculate_attraction_reward()
+            self.players[0].reward += attraction_reward
+    
+    def _apply_loading_rewards(self, loaded_foods):
+        """
+        分配食物加载的基础奖励
+        
+        参数:
+            loaded_foods: 食物加载结果列表
+        """
+        for food_info in loaded_foods:
+            player = food_info['player']
+            success = food_info['success']
+            food_level = food_info['food_level']
+            total_level = food_info['total_level']
+            
+            if success:
+                # 加载成功 - 分配奖励
+                player.reward = float(player.level * food_level)
+                
+                # 可选的奖励标准化
+                if self._normalize_reward:
+                    player.reward = player.reward / float(total_level * self._food_spawned)
+            else:
+                # 加载失败 - 给予惩罚
+                player.reward -= self.penalty
+    
     def _apply_final_reward_adjustments(self):
         """
         在游戏结束时应用最终的奖励调整
@@ -1092,7 +1168,7 @@ class ForagingEnv(gym.Env):
         """
         # 计算步数效率系数：(最大步数 - 当前步数) / 最大步数
         # 这样步数越少，系数越大
-        step_efficiency = max(0, (self._max_episode_steps - self.current_step) / self._max_episode_steps)
+        step_efficiency = exp(-0.1 *(self._max_episode_steps - self.current_step) / self._max_episode_steps)
         
         player = self.players[0]    #仅为主智能体添加奖惩
         # 只对有正奖励的玩家给予步数加成
@@ -1117,7 +1193,7 @@ class ForagingEnv(gym.Env):
 
         # 计算距离惩罚：距离越远惩罚越大
         # 使用归一化的距离比例
-        distance_ratio = min(1.0, distance_to_food / max_distance)
+        distance_ratio = exp(-0.1 *(distance_to_food / max_distance))
         distance_penalty = self.distance_penalty_factor * distance_ratio
             
         # 应用惩罚（减少奖励）
@@ -1125,6 +1201,54 @@ class ForagingEnv(gym.Env):
 
         self.logger.debug(f"玩家 {player.name} 获得距离惩罚: -{distance_penalty:.4f} "
                         f"(距离: {distance_to_food}, 距离比例: {distance_ratio:.4f})")
-
-    def valid_actions(self, player_id):
-        return self._valid_actions[self.players[player_id]]
+    
+    def calculate_attraction_reward(self):
+        """
+        计算终局吸引力奖励
+        基于整个episode中智能体对食物的吸引力变化
+        """
+        if not self.agent_positions_history or not self.food_positions_history:
+            return 0.0
+            
+        # 计算智能体到食物的平均距离变化
+        total_distance_change = 0
+        valid_steps = 0
+        
+        for i in range(1, len(self.agent_positions_history)):
+            
+            # 获取当前步骤的食物位置
+            current_food_positions = self.food_positions_history[i]
+            if len(current_food_positions) == 0:  # 如果没有食物，跳过
+                continue
+                
+            # 计算当前步骤到最近食物的距离
+            current_distances = [abs(self.agent_positions_history[i][0] - f[0]) + 
+                               abs(self.agent_positions_history[i][1] - f[1]) 
+                               for f in current_food_positions]
+            current_min_distance = min(current_distances)
+            
+            # 计算上一步骤到最近食物的距离
+            prev_food_positions = self.food_positions_history[i-1]
+            if len(prev_food_positions) == 0:  # 如果没有食物，跳过
+                continue
+                
+            prev_distances = [abs(self.agent_positions_history[i-1][0] - f[0]) + 
+                            abs(self.agent_positions_history[i-1][1] - f[1]) 
+                            for f in prev_food_positions]
+            prev_min_distance = min(prev_distances)
+            
+            # 计算距离变化
+            distance_change = prev_min_distance - current_min_distance
+            total_distance_change += distance_change
+            valid_steps += 1
+        
+        if valid_steps == 0:
+            return 0.0
+            
+        # 计算平均距离变化
+        avg_distance_change = total_distance_change / valid_steps
+        
+        # 使用sigmoid函数将距离变化映射到[-1, 1]区间
+        attraction_reward = 2 / (1 + np.exp(-avg_distance_change)) - 1
+        
+        return attraction_reward * self.attraction_reward_factor

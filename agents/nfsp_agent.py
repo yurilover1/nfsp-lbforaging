@@ -128,8 +128,7 @@ class NFSPAgent(BaseAgent):
         
         # 初始化平均策略和最佳响应
         self.avg_policy = AveragePolicy(self)
-        self.best_response = RandomBestResponse(self.rl_eval_network)
-        
+
         self.networks_initialized = True
        
     def _ensure_network_compatibility(self, state):
@@ -194,14 +193,8 @@ class NFSPAgent(BaseAgent):
         """
         # 如果已经是numpy数组，可能是预处理过的状态
         if isinstance(obs, np.ndarray):
-            # 首先检查是否是三层观测格式 [3,5,5]
-            if len(obs.shape) == 3 and obs.shape[0] == 3 and obs.shape[1] == 5 and obs.shape[2] == 5:
-                # 直接按权重叠加三层观测
-                # 自身层乘以1，友方层乘以2，食物层乘以3
-                merged_layer = obs[0] * 1 + obs[1] * 2 + obs[2] * 3
-                return merged_layer.reshape(-1).astype(np.float32)
             # 检查是否是标准网格观测格式
-            elif len(obs.shape) == 3:
+            if len(obs.shape) == 3:
                 # 展平多维数组
                 return obs.reshape(-1).astype(np.float32)
             # 确保是一维数组
@@ -275,35 +268,20 @@ class NFSPAgent(BaseAgent):
             
         observation, action, reward, next_observation, done = self.rl_buffer.sample(self.rl_batch_size)
         
-        observation = torch.FloatTensor(observation).to(self.device)
-        action = torch.LongTensor(action).to(self.device)
-        reward = torch.FloatTensor(reward).to(self.device)
-        next_observation = torch.FloatTensor(next_observation).to(self.device)
-        done = torch.FloatTensor(done).to(self.device)
-        
-        # 计算当前Q值
-        q_values = self.rl_eval_network.forward(observation)
-        next_q_values = self.rl_target_network.forward(next_observation)
-        argmax_actions = self.rl_eval_network.forward(next_observation).max(1)[1].detach()
-        next_q_value = next_q_values.gather(1, argmax_actions.unsqueeze(1)).squeeze(1)
-        q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
-        
-        # 计算目标Q值
-        expected_q_value = reward + self.gamma * (1 - done) * next_q_value
-        
-        # 计算损失
-        loss = (q_value - expected_q_value.detach()).pow(2).mean()
-        self.RLlosses.append(loss.item())
-        
-        # 优化模型
-        self.rl_optimizer.zero_grad()
-        loss.backward()
-        self.rl_optimizer.step()
-        
-        # 定期更新目标网络
-        if self.count % self.update_freq == 0:
-            self.rl_target_network.load_state_dict(
-                self.rl_eval_network.state_dict())
+        # 使用模型中的train方法进行训练
+        self.rl_eval_network.train(
+            observation=observation,
+            action=action,
+            reward=reward,
+            next_observation=next_observation,
+            done=done,
+            target_network=self.rl_target_network,
+            optimizer=self.rl_optimizer,
+            gamma=self.gamma,
+            count=self.count,
+            update_freq=self.update_freq,
+            losses=self.RLlosses
+        )
     
     def sl_train(self):
         """训练策略网络 (SL)"""
@@ -314,30 +292,12 @@ class NFSPAgent(BaseAgent):
             
         observation, action = self.sl_buffer.sample(self.sl_batch_size)
         
-        observation = torch.FloatTensor(observation).to(self.device)
-        action = torch.LongTensor(action).to(self.device)
-        
-        # 计算策略概率
-        probs = self.sl_policy.forward(observation)
-        log_prob = probs.gather(1, action.unsqueeze(1)).squeeze(1).log()
-        
-        # 计算准确率 (预测的最高概率动作与实际动作匹配的比例)
-        pred_actions = probs.argmax(dim=1)
-        accuracy = (pred_actions == action).float().mean().item()
-        self.policy_accuracies.append(accuracy)
-        
-        # 计算损失 (负对数似然)
-        loss = -log_prob.mean()
-        self.losses.append(loss.item())
-        
-        # 优化模型
-        self.sl_optimizer.zero_grad()
-        loss.backward()
-        self.sl_optimizer.step()
+        self.losses.append(self.sl_policy.train(
+            observation, action, self.policy_accuracies, self.sl_optimizer))
     
     def step(self, obs):
         """根据观察选择动作，支持字典格式的observation"""
-        # 若为训练则计数加1，并重选策略模式
+        # 若为训练则计数加1
         if (not self.eval_flag):
             self.count += 1
         
@@ -359,8 +319,9 @@ class NFSPAgent(BaseAgent):
         state_tensor = torch.FloatTensor(np.expand_dims(state, 0)).to(self.device)
         
         # 根据策略模式选择动作概率
+        r_flag = False
         if self.policy_mode == 'best':
-            probs = self.rl_eval_network.act(state_tensor, self.epsilon(self.count))
+            probs, r_flag = self.rl_eval_network.act(state_tensor, self.epsilon(self.count))
         else:
             probs = self.sl_policy.act(state_tensor)
         
@@ -368,7 +329,10 @@ class NFSPAgent(BaseAgent):
         valid_probs = action_mask(probs, legal_actions)
         
         # 选择动作
-        action = np.random.choice(len(valid_probs), p=valid_probs)
+        if r_flag:
+            action = np.argmax(valid_probs)
+        else:
+            action = np.random.choice(len(valid_probs), p=valid_probs)
         return action
     
     def eval_step(self, obs):
@@ -378,7 +342,7 @@ class NFSPAgent(BaseAgent):
         self.eval_flag = True
         return self.step(obs)
     
-    def add_traj(self, traj):
+    def add_traj2buffer(self, traj):
         """
         将轨迹添加到经验缓冲区
         轨迹是包含state, action, reward, next_state, done等信息的转换样本列表
@@ -386,8 +350,8 @@ class NFSPAgent(BaseAgent):
         # 确认轨迹是单个转换样本，而不是列表
         if isinstance(traj, list) and len(traj) == 5:
             state, action, reward, next_state, done = traj
-            state = self._preprocess_state(state)
-            next_state = self._preprocess_state(next_state)
+            # state = self._preprocess_state(state)
+            # next_state = self._preprocess_state(next_state)
             # 使用标准缓冲区方法添加经验
             self.rl_buffer.store(state, action, reward, next_state, done)
             
@@ -560,59 +524,3 @@ class AveragePolicy:
             
             # 返回动作概率
             return probs.cpu().numpy()[0]
-
-
-class RandomBestResponse:
-    def __init__(self, q_network):
-        # 检查输入类型
-        if hasattr(q_network, 'rl_eval_network'):
-            # 如果输入是NFSPAgent对象
-            self.q_network = q_network.rl_eval_network
-            if hasattr(q_network, 'device'):
-                self.device = q_network.device
-            else:
-                self.device = next(self.q_network.parameters()).device
-        elif hasattr(q_network, 'parameters'):
-            # 如果输入是PyTorch模型
-            self.q_network = q_network
-            self.device = next(q_network.parameters()).device
-        else:
-            # 处理其他情况
-            raise ValueError(f"不支持的q_network类型: {type(q_network)}")
-            
-        self.use_raw = False
-      
-    def act(self, state, eps=0.05):
-        try:
-            with torch.no_grad():
-                # 状态预处理
-                if not isinstance(state, torch.Tensor):
-                    state = torch.FloatTensor(state).to(self.device)
-                
-                # 确保状态维度正确
-                if len(state.shape) == 1:
-                    state = state.unsqueeze(0)
-                    
-                # 获取Q值
-                q_values = self.q_network.forward(state)
-                
-                # epsilon-贪心策略
-                if random.random() < eps:
-                    # 随机探索
-                    action_probs = np.ones(q_values.shape[1]) / q_values.shape[1]
-                else:
-                    # 选择最大Q值的动作
-                    max_q_action = q_values.argmax(dim=1).item()
-                    action_probs = np.zeros(q_values.shape[1])
-                    action_probs[max_q_action] = 1.0
-                    
-                return action_probs
-        except Exception as e:
-            print(f"RandomBestResponse.act 出错: {e}")
-            # 如果发生错误，返回均匀分布的动作概率
-            if hasattr(self.q_network, 'forward'):
-                output_size = self.q_network.forward(torch.zeros(1, state.shape[-1] if isinstance(state, torch.Tensor) else len(state)).to(self.device)).shape[1]
-                return np.ones(output_size) / output_size
-            else:
-                # 如果无法确定输出大小，返回一个默认大小的均匀分布
-                return np.ones(10) / 10 

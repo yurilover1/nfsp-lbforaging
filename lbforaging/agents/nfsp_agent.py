@@ -359,19 +359,10 @@ class NFSPAgent(BaseAgent):
             if 'actions' in obs:
                 # 优先使用字典中的actions键
                 legal_actions = obs['actions']
-            elif 'obs' in obs and hasattr(obs['obs'], 'actions'):
-                # 然后尝试obs.actions
-                legal_actions = obs['obs'].actions
             else:
                 # 最后才使用默认动作
                 legal_actions = list(range(self.action_size))
-        elif hasattr(obs, 'actions'):
-            # 直接从observation获取合法动作
-            legal_actions = obs.actions
-        else:
-            # 默认所有动作都合法
-            legal_actions = list(range(self.action_size))
-        
+                
         # 确保legal_actions非空
         if not legal_actions:
             print(f"警告: 智能体{self.player.level if hasattr(self.player, 'level') else '?'}收到空的legal_actions列表，使用所有动作")
@@ -425,7 +416,7 @@ class NFSPAgent(BaseAgent):
         
         # 根据评估模式选择动作概率
         if self.eval_mode == 'best':
-            probs = self.rl_eval_network.act(state_tensor, 0)  # 评估时不使用随机探索
+            probs = self.rl_eval_network.act(state_tensor, epsilon=0)  # 评估时不使用随机探索
         else:
             probs = self.sl_policy.act(state_tensor)
         
@@ -434,7 +425,7 @@ class NFSPAgent(BaseAgent):
         
         # 选择动作
         action = np.random.choice(len(valid_probs), p=valid_probs)
-        return action, probs
+        return action
     
     def add_traj(self, traj):
         """
@@ -469,7 +460,7 @@ class NFSPAgent(BaseAgent):
         player_id = teamate_id
         
         # 保存网络权重
-        torch.save(self.rl_eval_network.state_dict(), f"{path}/nfsp_agent_{player_id}_q_network.pth")
+        torch.save(self.rl_target_network.state_dict(), f"{path}/nfsp_agent_{player_id}_q_network.pth")
         torch.save(self.sl_policy.state_dict(), f"{path}/nfsp_agent_{player_id}_policy_network.pth")
         
         # 保存模型元数据（保存状态大小信息，以便在不同观察模式下恢复）
