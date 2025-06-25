@@ -2,6 +2,7 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import logging
+import torch
 from agents.nfsp_agent import NFSPAgent
 from agents.ppo_agent import PPOAgent
 from partners.agent import SimpleAgent2
@@ -34,11 +35,11 @@ def create_agent(agent_type, player, state_size, action_size, layers, device):
         agent = NFSPAgent(
             player=player,
             state_size=state_size, action_size=action_size,
-            epsilon_init=0.4, epsilon_decay=30000, epsilon_min=0.05,
-            update_freq=200, sl_lr=0.0005, rl_lr=0.0001,
-            sl_buffer_size=10000, rl_buffer_size=20000,
-            rl_start=300, sl_start=300, train_freq=4, gamma=0.99, eta=0.1,
-            rl_batch_size=128, sl_batch_size=256, hidden_units=256,
+            epsilon_init=0.3, epsilon_decay=10000, epsilon_min=0.05,
+            update_freq=1, sl_lr=0.005, rl_lr=1e-4,
+            sl_buffer_size=20000, rl_buffer_size=80000,
+            rl_start=1000, sl_start=1000, train_freq=10, gamma=0.98, eta=0.0,
+            rl_batch_size=256, sl_batch_size=256, hidden_units=256, tau=0.1,
             layers=layers, device=device, eval_mode='best'
         )
         return agent
@@ -72,11 +73,6 @@ def calculate_state_size(env):
         if isinstance(first_obs, np.ndarray):
             # 检查是否为三维数组
             if len(first_obs.shape) == 3:
-                # 检查是否为三层观测模式 [3, 5, 5]
-                if first_obs.shape[0] == 3 and first_obs.shape[1] == 5 and first_obs.shape[2] == 5:
-                    print(f"检测到三层观测模式: 形状={first_obs.shape}")
-                    return 3 * 5 * 5  # 返回展平后的大小
-                
                 # 检查是否为普通网格观测模式
                 print(f"检测到网格观测模式: 形状={first_obs.shape}")
                 return first_obs.size  # 返回展平后的大小
@@ -107,28 +103,27 @@ def calculate_state_size(env):
         # 默认状态大小
         return 100
 
-def plot_training_curve(history, num_episodes, eval_interval, main_agents=None, teamate_id=0, type='ppo'):
+def plot_training_curve(history, num_episodes, eval_interval, main_agents=None, teamate_id=0, type='ppo', layer_num=7):
     """绘制训练曲线，显示评估奖励随批次变化的趋势以反映模型收敛速度与性能"""
     # 检查是否有评估数据
     if 'eval_rewards' not in history or len(history['eval_rewards']) == 0:
         print("没有评估数据，无法绘制评估曲线")
         return
      # 只使用第一个NFSP智能体数据
-    if main_agents and len(main_agents) > 0:
-        agent = main_agents[0]
-        
-        # 处理强化学习损失
-        losses = np.array(agent.RLlosses) if type == 'nfsp' else np.array(agent.losses)
-            
-        # 降采样
-        if len(losses) > 1000:
-            step = len(losses) // 1000
-            losses = losses[::step]
-        
-        # 平滑处理
-        window_size = min(20, len(losses))
-        if window_size > 1:
-            smooth_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+    agent = main_agents
+
+    # 处理强化学习损失
+    losses = np.array(agent.RLlosses) if type == 'nfsp' else np.array(agent.losses)
+
+    # 降采样
+    if len(losses) > 1000:
+        step = len(losses) // 1000
+        losses = losses[::step]
+
+    # 平滑处理
+    window_size = min(20, len(losses))
+    if window_size > 1:
+        smooth_losses = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
         
     # 准备评估数据
     eval_rewards = history['eval_rewards']
@@ -173,11 +168,11 @@ def plot_training_curve(history, num_episodes, eval_interval, main_agents=None, 
     
     # 保存图像
     plt.tight_layout()
-    plt.savefig(f'./results/eval_performance_curve_{teamate_id}_{type}.png')
-    print(f"评估性能曲线已保存至: ./results/eval_performance_curve_{teamate_id}_{type}.png")
+    plt.savefig(f'./results/eval_performance_curve_{teamate_id}_{type}_{layer_num}.png')
+    print(f"评估性能曲线已保存至: ./results/eval_performance_curve_{teamate_id}_{type}_{layer_num}.png")
     plt.close()
 
-def save_history(history, nfsp_agents):
+def save_history(history, nfsp_agents, layer_num=7):
     """保存训练历史数据"""
     # 创建保存目录
     os.makedirs("./results", exist_ok=True)
@@ -203,8 +198,8 @@ def save_history(history, nfsp_agents):
     
     # 保存为numpy格式
     try:
-        np.savez('./results/training_history.npz', **data_to_save)
-        print("训练历史保存成功: ./results/training_history.npz")
+        np.savez(f'./results/training_history_{layer_num}.npz', **data_to_save)
+        print(f"训练历史保存成功: ./results/training_history_{layer_num}.npz")
     except Exception as e:
         print(f"保存训练历史时出错: {e}")
         import traceback

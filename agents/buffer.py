@@ -10,9 +10,15 @@ class replay_buffer:
         """初始化参数和缓冲区"""
         self.buffer_size = buffer_size
         self.buffer = deque(maxlen=buffer_size)
+
+    def clear(self):
+        """<UNK>"""
+        self.buffer.clear()
     
     def store(self, state, action, reward, next_state, done):
         """存储经验到缓冲区"""
+        if self.buffer_size == len(self.buffer):
+            self.buffer.popleft()
         self.buffer.append((state, action, reward, next_state, done))
     
     def sample(self, batch_size):

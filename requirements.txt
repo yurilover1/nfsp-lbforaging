@@ -1,7 +1,7 @@
 numpy
 matplotlib
 gymnasium==0.28.1
-pyglet==1.5.27
+pyglet>=1.5.27
 torch
 pillow
 cloudpickle

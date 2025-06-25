@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import torch
 
 
 class dueling_ddqn(nn.Module):
@@ -116,14 +117,80 @@ class dueling_ddqn(nn.Module):
         if np.random.random() < epsilon:
             # 随机探索
             probs = np.ones(len(q_values)) / len(q_values)
+            random_flag = False
         else:
             # 贪婪策略，但使用softmax生成更好的概率分布
             temperature = 0.1  # 增加温度使分布更平滑
             scaled_q_values = q_values / temperature
             exp_q = np.exp(scaled_q_values - np.max(scaled_q_values))  # 减去最大值以避免数值溢出
             probs = exp_q / np.sum(exp_q)
+            random_flag = True
+
+        return probs, random_flag
+        
+    def train(self, observation, action, reward, next_observation, done,
+              target_network, optimizer, gamma=0.99, count=0, update_freq=1000, tau=0.005, losses=None, clip_grad_norm=1.0):
+        """训练网络
+        
+        参数:
+            observation: 当前观察状态
+            action: 采取的动作
+            reward: 获得的奖励
+            next_observation: 下一个观察状态
+            done: 是否结束
+            target_network: 目标网络
+            optimizer: 优化器
+            gamma: 折扣因子
+            count: 当前训练计数
+            update_freq: 目标网络更新频率
+            tau: 软更新系数
+            losses: 损失记录列表
+            clip_grad_norm: 梯度裁剪的最大范数，None表示不进行梯度裁剪
+        
+        返回:
+            loss: 当前批次的损失值
+        """
+        device = next(self.parameters()).device
+        
+        # 将数据转换为tensor并移动到对应设备
+        observation = torch.FloatTensor(observation).to(device)
+        action = torch.LongTensor(action).to(device)
+        reward = torch.FloatTensor(reward).to(device)
+        next_observation = torch.FloatTensor(next_observation).to(device)
+        done = torch.FloatTensor(done).to(device)
+        
+        # 计算当前Q值
+        q_values = self.forward(observation)
+        next_q_values = target_network.forward(next_observation)
+        argmax_actions = self.forward(next_observation).max(1)[1].detach()
+        next_q_value = next_q_values.gather(1, argmax_actions.unsqueeze(1)).squeeze(1)
+        q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
+        
+        # 计算目标Q值
+        expected_q_value = reward + gamma * ( 1 - done) * next_q_value
+        
+        # 计算损失
+        loss = (q_value - expected_q_value.detach()).pow(2).mean()
+        if losses is not None:
+            losses.append(loss.item())
+        
+        # 优化模型
+        optimizer.zero_grad()
+        loss.backward()
+        
+        # 梯度裁剪 - 防止梯度爆炸
+        if clip_grad_norm is not None and clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), clip_grad_norm)
+        
+        optimizer.step() 
+        
+        # 定期更新目标网络
+        if count % update_freq == 0:
+            # 软更新目标网络
+            for target_param, param in zip(target_network.parameters(), self.parameters()):
+                target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
             
-        return probs
+        return loss.item()
 
 
 class policy(nn.Module):
@@ -209,4 +276,47 @@ class policy(nn.Module):
         """根据策略网络选择动作"""
         # 获取动作概率
         probs = self.forward(state).detach().cpu().numpy()[0]
-        return probs 
+        return probs
+    
+    def train(self, observation, action, policy_accuracies, optimizer, clip_grad_norm=1.0):
+        """训练策略网络
+        
+        参数:
+            observation: 观察状态
+            action: 实际采取的动作
+            policy_accuracies: 策略准确率记录列表
+            optimizer: 优化器
+            clip_grad_norm: 梯度裁剪的最大范数，None表示不进行梯度裁剪
+        
+        返回:
+            loss: 当前批次的损失值
+        """
+        device = next(self.parameters()).device
+        
+        # 将数据转换为tensor并移动到对应设备
+        observation = torch.FloatTensor(observation).to(device)
+        action = torch.LongTensor(action).to(device)
+
+        # 计算策略概率
+        probs = self.forward(observation)
+        log_prob = probs.gather(1, action.unsqueeze(1)).squeeze(1).log()
+        
+        # 计算准确率 (预测的最高概率动作与实际动作匹配的比例)
+        pred_actions = probs.argmax(dim=1)
+        accuracy = (pred_actions == action).float().mean().item()
+        policy_accuracies.append(accuracy)
+        
+        # 计算损失 (负对数似然)
+        loss = -log_prob.mean()
+        
+        # 优化模型
+        optimizer.zero_grad()
+        loss.backward()
+        
+        # 梯度裁剪 - 防止梯度爆炸
+        if clip_grad_norm is not None and clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), clip_grad_norm)
+        
+        optimizer.step()
+        
+        return loss.item()

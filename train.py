@@ -6,28 +6,51 @@ import gymnasium as gym
 import logging
 from tqdm import tqdm
 from evaluate import evaluate
-from utils import save_history, plot_training_curve
+from random import randint
+from utils import save_history, plot_training_curve, teammate_generate
 
 logger = logging.getLogger(__name__)
 
-def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False, render_interval=100,
-                 teamate_id=0):
+def update_progress_bar(pbar, payoffs, recent_rewards, batch_rewards, batch_start_time):
+    """更新进度条显示
+    
+    参数:
+        pbar: tqdm进度条对象
+        team_reward: 当前回合的团队奖励
+        batch_rewards: 当前批次的奖励列表
+        batch_start_time: 批次开始时间
+    """
+    # 计算当前回合的团队奖励
+    team_reward = sum(payoffs)
+    recent_rewards.append(team_reward)
+    batch_rewards.append(team_reward)
+    
+    # 计算当前批次的平均奖励
+    avg_batch_reward = sum(batch_rewards) / len(batch_rewards)
+    
+    # 计算当前批次所用时间
+    elapsed_time = time.time() - batch_start_time
+    
+    # 更新进度条
+    pbar.set_postfix({
+        '奖励': f'{team_reward:.2f}', 
+        '平均': f'{avg_batch_reward:.2f}',
+        '用时': f'{elapsed_time:.1f}s'
+    })
+    pbar.update(1)
+
+def train_agents(env, agent, num_episodes=5000, eval_interval=100, render=False, render_interval=100, layer_num=7):
     """训练智能体与预加载的SimpleAgent2队友合作
     
     参数:
         env: 游戏环境
-        agents: 智能体列表，第一个为主智能体，第二个为SimpleAgent2
+        agent: 主智能体
         num_episodes: 训练回合数
         eval_interval: 评估间隔
         render: 是否渲染
         render_interval: 渲染间隔
-        teamate_id: 队友ID
     """
-    # 判断智能体类型
-    nfsp_agents = [agent for agent in agents if agent.name.startswith('NFSP')]
-    ppo_agents = [agent for agent in agents if agent.name.startswith('PPO')]
-    teammate_agents = [agent for agent in agents if not hasattr(agent, 'add_traj')]
-    
+   
     # 训练历史记录
     history = {
         'episode_rewards': [],
@@ -49,7 +72,6 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
     total_batches = num_episodes // 100
     
     print(f"\n开始训练 - 总共 {num_episodes} 回合 ({total_batches} 批次)...\n")
-    print(f"正在训练 {len(nfsp_agents)} 个NFSP智能体, {len(ppo_agents)} 个PPO智能体与 {len(teammate_agents)} 个SimpleAgent2队友合作\n")
 
     # 外层循环处理每个批次
     for batch in range(total_batches):
@@ -64,7 +86,8 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
             # 记录当前批次的奖励
             batch_rewards = []
             steps_list = []
-            agent = agents[0]
+            
+            agents = [agent, teammate_generate(6, device='cpu',  id = randint(0, 7))]
             
             # 处理当前批次中的每个回合
             for i in range(batch_size):
@@ -85,43 +108,29 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
                     pbar.clear()
 
                 else:
-                    # 正常训练，不渲染
+                    # 正常运行，不渲染
                     _, payoffs, steps = env.run(agents, is_training=True, render=False)
                 
                 # 记录每个回合的奖励
                 history['episode_rewards'].append(payoffs)
                 steps_list.append(steps)
-                # 计算团队总奖励（智能体奖励之和）
-                team_reward = sum(payoffs)
-                recent_rewards.append(team_reward)
-                batch_rewards.append(team_reward)
                 
                 # 更新进度条
-                avg_batch_reward = sum(batch_rewards) / len(batch_rewards)
-                elapsed_time = time.time() - batch_start_time
-                pbar.set_postfix({
-                    '奖励': f'{team_reward:.2f}', 
-                    '平均': f'{avg_batch_reward:.2f}',
-                    '用时': f'{elapsed_time:.1f}s'
-                })
-                pbar.update(1)
+                update_progress_bar(pbar, payoffs, recent_rewards, batch_rewards, batch_start_time)
 
                 if episode % agent.train_freq == 0:
-                    agent.rl_train()
-                    agent.sl_train()
+                    agent.rl_train(5)
+                    # agent.sl_train(50)
 
-            
-            # 批次完成后显示平均奖励
-            avg_reward = np.mean(recent_rewards)
-            elapsed_time = time.time() - batch_start_time
-            avg_steps = np.mean(steps_list)
+
+
             # 关闭当前进度条
             pbar.close()
             
             # 打印批次完成信息（使用彩色文本和表情符号使其更明显）
             batch_summary = (f"✅ 批次 {batch+1}/{total_batches} 完成 | "
-                             f"平均奖励: {avg_reward:.4f} | "
-                             f"步数：{avg_steps} | "
+                             f"平均奖励: {np.mean(recent_rewards):.4f} | "
+                             f"步数：{np.mean(steps_list)} | "
                              f"总进度: {(batch+1)/total_batches*100:.1f}%")
             print(f"\033[92m{batch_summary}\033[0m\n")
             
@@ -129,46 +138,27 @@ def train_agents(env, agents, num_episodes=5000, eval_interval=100, render=False
             recent_rewards = []
             
             # 评估
-            if batch % 1 == 0:
-                print(f"\n执行评估 ( 批次 {batch})...")
-                
-                # 评估智能体性能
-                eval_result = evaluate(
-                    env, 
-                    agents, 
-                    eval_episodes=100,  # 评估回合数
-                    calculate_exploitability=False
-                )
-                rewards = eval_result
-                
-                # 记录评估结果
-                history['eval_rewards'].append(rewards)
-                history['eval_batches'].append(batch)
-                
-                # 打印评估结果
-                print(f"评估结果 (批次 {batch}):")
-                print(f"团队平均奖励: {np.sum(rewards):.4f}")
+            print(f"\n执行评估 ( 批次 {batch})...")
+            
+            rewards = evaluate(env, agents)
+            
+            # 记录评估结果
+            history['eval_rewards'].append(rewards)
+            history['eval_batches'].append(batch)
+            
+            # 打印评估结果
+            print(f"评估结果 (批次 {batch}):")
+            print(f"团队平均奖励: {np.sum(rewards):.4f}")
             print("-" * 50)
     
     print("\n训练完成！\n")
-    
+
     # 保存模型（NFSP智能体）
-    for agent in nfsp_agents:
-        agent.save_models(teamate_id = teamate_id)
-    
-    # 保存模型（PPO智能体）
-    for i, agent in enumerate(ppo_agents):
-        model_path = os.path.join("./models", f"ppo_agent_{teamate_id}_model.pt")
-        agent.save_models(model_path)
-        print(f"PPO智能体模型已保存到 {model_path}")
-    
-    # 绘制训练曲线
-    plot_training_curve(history, num_episodes, eval_interval, 
-                        nfsp_agents + ppo_agents, teamate_id, 
-                        type='ppo' if len(ppo_agents) > 0 else 'nfsp')
-    
+    agent.save_models()
+
     # 保存训练历史记录
-    save_history(history, nfsp_agents + ppo_agents)
+    history['rl_losses'].extend(agent.RLlosses)
+    save_history(history, agent, layer_num=layer_num)
     
-    return agents
+    return agent
 

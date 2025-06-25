@@ -63,6 +63,59 @@ def action_mask(probs, legal_actions):
     
     return masked_probs
 
+def action_mask_with_load_boost(probs, legal_actions, count=0, boost_factor=2.0, decay_rate=5000):
+    """
+    过滤不合法的动作，并增强加载动作(LOAD=5)的权重
+    
+    参数:
+        probs: 动作概率分布
+        legal_actions: 合法动作列表
+        count: 当前训练步数，用于计算衰减
+        boost_factor: 加载动作的增强系数
+        decay_rate: 增强效果的衰减率
+        
+    返回:
+        过滤后的概率分布，加载动作权重被增强
+    """
+    # 确保legal_actions非空
+    if not legal_actions:
+        print("警告: legal_actions为空，仅使用NONE动作(索引0)")
+        legal_actions = [0]  # 只使用NONE动作(索引0)，而不是所有动作
+    
+    # 处理probs中可能存在的NaN或inf值
+    probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+    
+    # 创建掩码数组，初始化为全0
+    masked_probs = np.zeros(len(probs))
+    
+    # 计算加载动作(LOAD=5)的增强系数，随着训练步数增加而衰减
+    current_boost = max(1.0, boost_factor * np.exp(-count / decay_rate))
+    
+    # 只设置合法动作的概率，并增强加载动作
+    for action in legal_actions:
+        if 0 <= action < len(probs):  # 确保动作索引有效
+            if action == 5 and 5 in legal_actions:  # 加载动作
+                masked_probs[action] = probs[action] * current_boost
+            else:
+                masked_probs[action] = probs[action]
+    
+    # 如果所有概率和为0，则采用加权均匀分布
+    prob_sum = np.sum(masked_probs)
+    if prob_sum <= 1e-10:  # 使用一个很小的阈值而不是精确的0
+        for action in legal_actions:
+            if 0 <= action < len(masked_probs):  # 确保动作索引有效
+                if action == 5 and 5 in legal_actions:  # 加载动作
+                    masked_probs[action] = current_boost / (len(legal_actions) - 1 + current_boost)
+                else:
+                    masked_probs[action] = 1.0 / (len(legal_actions) - 1 + current_boost)
+    else:
+        # 重新归一化概率分布
+        masked_probs = masked_probs / prob_sum
+    
+    masked_probs = masked_probs / np.sum(masked_probs)
+    
+    return masked_probs
+
 def compute_gae(rewards, values, dones, gamma=0.99, lambda_=0.95):
     """计算广义优势估计（GAE）"""
     advantages = np.zeros_like(rewards)

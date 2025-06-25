@@ -102,6 +102,7 @@ class ForagingEnv(gym.Env):
         step_reward_factor=0.1,  # 新增：胜利时步数奖励系数
         distance_penalty_factor=0.1,  # 新增：失败时距离惩罚系数
         attraction_reward_factor=0.1,  # 新增：吸引力奖励系数
+        decay_rate=0.01,  # 新增：步数衰减率
     ):
         self.logger = logging.getLogger(__name__)
         self.render_mode = render_mode
@@ -114,6 +115,7 @@ class ForagingEnv(gym.Env):
         self.step_reward_factor = step_reward_factor  # 胜利时步数奖励系数
         self.distance_penalty_factor = distance_penalty_factor  # 失败时距离惩罚系数
         self.attraction_reward_factor = attraction_reward_factor  # 吸引力奖励系数
+        self.decay_rate = decay_rate  # 步数衰减率
         
         # 新增：记录位置历史
         self.agent_positions_history = []
@@ -575,10 +577,6 @@ class ForagingEnv(gym.Env):
             or abs(player.position[1] - col) == 1
             and player.position[0] == row
         ]
-        
-    def get_valid_actions(self) -> list:
-        """获取所有智能体可能的联合动作组合"""
-        return list(product(*[self._valid_actions[player] for player in self.players]))
 
     def _is_empty_location(self, row, col):
         """检查指定位置是否为空"""
@@ -589,30 +587,6 @@ class ForagingEnv(gym.Env):
                 return False
 
         return True
-
-    def _distance_to_nearest_food(self, player_position):
-        """
-        计算智能体到最近食物的曼哈顿距离
-        
-        参数:
-            player_position: 智能体位置 (row, col)
-            
-        返回:
-            int: 到最近食物的曼哈顿距离，如果没有食物返回场地对角线长度
-        """
-        food_positions = np.argwhere(self.field > 0)
-        
-        if len(food_positions) == 0:
-            # 如果没有食物，返回场地对角线长度作为最大距离
-            return self.rows + self.cols
-        
-        # 计算到所有食物的曼哈顿距离
-        distances = []
-        for food_pos in food_positions:
-            distance = abs(player_position[0] - food_pos[0]) + abs(player_position[1] - food_pos[1])
-            distances.append(distance)
-        
-        return min(distances)
 
     def spawn_food(self, max_num_food, min_levels, max_levels):
         """生成食物到环境中"""
@@ -665,7 +639,7 @@ class ForagingEnv(gym.Env):
                 if self._is_empty_location(row, col):
                     player.setup(
                         (row, col),
-                        self.np_random.integers(min_player_level, max_player_level + 1),
+                        self.np_random.integers(min_player_level, max_player_level + 1) if player == self.players[0] else 1,
                         self.field_size,
                     )
                     break
@@ -693,7 +667,7 @@ class ForagingEnv(gym.Env):
             min_levels=self.min_food_level,
             max_levels=self.max_food_level
             if self.max_food_level is not None
-            else np.array([sum(player_levels[:3])] * self.max_num_food),
+            else np.array([sum(player_levels[:2])] * self.max_num_food),
         )
         self.current_step = 0
         self._game_over = False
@@ -785,6 +759,7 @@ class ForagingEnv(gym.Env):
         返回:
             trajectories: 每个玩家的轨迹列表
             payoffs: 每个玩家的总奖励
+            steps: 总步数
         """
         if agents is not None:
             # 临时设置控制器
@@ -801,6 +776,10 @@ class ForagingEnv(gym.Env):
         # 初始化动作缓冲区
         actions_buffs = [deque(maxlen=50) for _ in range(len(self.players))]  # 每个智能体的动作历史
         
+        # 区分主智能体和队友智能体
+        player = self.players[0]  # 主智能体（被训练的智能体）
+        opps = self.players[1:] if len(self.players) > 1 else []  # 队友智能体
+        
         # 渲染初始状态
         if render:
             self.render()
@@ -812,31 +791,47 @@ class ForagingEnv(gym.Env):
             steps += 2
             # 收集动作
             actions = []
-            valid_actions = [[], []]
 
-            for i, player in enumerate(self.players):
-                # 提取有效动作
-                valid_actions[i] = [action.value for action in self._valid_actions[player]]
-                
-                # 构建observation字典 - 支持网格观察和非网格观察模式
-                obs_dict = {
-                    'obs': obss[i], 'actions': valid_actions[i]  # 使用实际有效的动作，不是所有动作
-                }
-                
-                # 让智能体选择动作
-                action = player.select_action(obs_dict, flag_train=is_training)
+            # 1. 处理主智能体的动作选择
+            main_valid_actions = [action.value for action in self._valid_actions[player]]
+            
+            # 构建主智能体的观察字典
+            main_obs_dict = {'obs': obss[0], 'actions': main_valid_actions}
+            
+            # 让主智能体选择动作
+            main_action = player.select_action(main_obs_dict, flag_train=is_training)
 
+            # 检测主智能体的重复动作模式
+            if self._repeated_actions_detected(main_action, actions_buffs[0]):
+                # 如果检测到重复，选择一个不同的随机动作
+                other_valid_actions = [a for a in main_valid_actions if a != main_action]
+                if other_valid_actions:  # 确保有其他有效动作可选
+                    main_action = np.random.choice(other_valid_actions)
+            
+            # 记录主智能体动作到缓冲区
+            actions_buffs[0].append(main_action)
+            actions.append(main_action)
+
+            # 2. 处理队友智能体的动作选择
+            for i, opp in enumerate(opps):
+                opp_idx = i + 1  # 队友在players中的实际索引
+                opp_valid_actions = [action.value for action in self._valid_actions[opp]]
                 
-                # 检测重复动作模式
-                if self._repeated_actions_detected(action, actions_buffs[i]):
-                    # 如果检测到重复，选择一个不同的随机动作
-                    other_valid_actions = \
-                        [a for a in valid_actions[i] if a != action]
-                    if other_valid_actions:  # 确保有其他有效动作可选
-                        action = np.random.choice(other_valid_actions)
-                # 记录动作到缓冲区
-                actions_buffs[i].append(action)
-                actions.append(action)
+                # 构建队友智能体的观察字典  
+                opp_obs_dict = {'obs': obss[opp_idx], 'actions': opp_valid_actions}
+                
+                # 让队友智能体选择动作
+                opp_action = opp.select_action(opp_obs_dict, flag_train=is_training)
+                
+                # 检测队友智能体的重复动作模式
+                if self._repeated_actions_detected(opp_action, actions_buffs[opp_idx]):
+                    other_valid_actions = [a for a in opp_valid_actions if a != opp_action]
+                    if other_valid_actions:
+                        opp_action = np.random.choice(other_valid_actions)
+                
+                # 记录队友智能体动作到缓冲区
+                actions_buffs[opp_idx].append(opp_action)
+                actions.append(opp_action)
             
             # 使用环境的step函数执行动作
             next_obss, rewards, done, _, _ = self.step(actions)
@@ -846,26 +841,24 @@ class ForagingEnv(gym.Env):
             
             # 记录每个智能体的轨迹
             for i in range(len(self.players)):
-                
                 trajectory_segment = [
-                    obss[i],  # 当前观察和有效动作
-                    actions[i],
-                    next_obss[i],  # 下一观察和有效动作
-                    done
+                    obss[i],  # 当前观察
+                    actions[i],  # 当前动作
+                    next_obss[i],  # 下一观察
+                    done  # 是否结束
                 ]
                 trajectories[i].append(trajectory_segment)
 
             obss = next_obss
 
-
             if render:
                 self.render()
                 time.sleep(sleep_time)
 
-        for ts in trajectories[0]:  #ts为局中智能体每次行动的轨迹
+        for ts in trajectories[0]:  #ts为局中智能体每次行动的轨迹, trajectories[0]为局中智能体0的轨迹
            if len(ts) > 0:
                # ts结构：[obs_dict, action, next_obs_dict, done]
-               # 添加轨迹(s_t, a_t, r_t, s_t+1)
+               # 添加轨迹(s_t, a_t, r_t, s_t+1), 其中r_t为总奖励
                agents[0].add_traj2buffer([ts[0], ts[1], payoffs[0],
                                ts[0] if ts[3] else ts[2], ts[3]])
             
@@ -945,10 +938,10 @@ class ForagingEnv(gym.Env):
             
             # 查找协作的智能体（也在加载同一个食物的智能体）
             adj_players = self.adjacent_players(frow, fcol)
-            adj_players = [p for p in adj_players if p in players_to_process or p is player]
+            adj_players = [p for p in adj_players if p in players_to_process]
             
             # 计算协作智能体的总等级
-            total_level = sum(a.level for a in adj_players)
+            total_level = sum(a.level for a in adj_players) + player.level
             
             # 从待处理集合中移除这些智能体
             players_to_process = players_to_process - set(adj_players)
@@ -956,7 +949,7 @@ class ForagingEnv(gym.Env):
             # 检查是否能成功加载食物
             if total_level < food_level:
                 # 加载失败 - 记录失败信息
-                for a in adj_players:
+                for a in adj_players + [player]:
                     loaded_foods.append({
                         'success': False,
                         'player': a,
@@ -968,7 +961,7 @@ class ForagingEnv(gym.Env):
                 continue
             
             # 加载成功 - 记录成功信息并移除食物
-            for a in adj_players:
+            for a in adj_players + [player]:
                 loaded_foods.append({
                     'success': True,
                     'player': a,
@@ -977,6 +970,7 @@ class ForagingEnv(gym.Env):
                     'total_level': total_level,
                     'cooperating_players': adj_players.copy()
                 })
+
             
             # 移除已加载的食物
             self.field[frow, fcol] = 0
@@ -1117,6 +1111,8 @@ class ForagingEnv(gym.Env):
         if self._game_over:
             attraction_reward = self.calculate_attraction_reward()
             self.players[0].reward += attraction_reward
+        if self.field.sum() == 0 and self.players[0].reward > 0:
+            self._apply_step_reward_bonus()
     
     def _apply_loading_rewards(self, loaded_foods):
         """
@@ -1133,74 +1129,15 @@ class ForagingEnv(gym.Env):
             
             if success:
                 # 加载成功 - 分配奖励
-                player.reward = float(player.level * food_level)
+                player.reward = 1#float(player.level * food_level)
                 
-                # 可选的奖励标准化
-                if self._normalize_reward:
-                    player.reward = player.reward / float(total_level * self._food_spawned)
             else:
                 # 加载失败 - 给予惩罚
-                player.reward -= self.penalty
-    
-    def _apply_final_reward_adjustments(self):
-        """
-        在游戏结束时应用最终的奖励调整
-        
-        包含两种调整机制：
-        1. 胜利时（所有食物被收集）：根据步数给予奖励加成，步数越少奖励越高
-        2. 失败时（超时）：根据智能体到最近食物的距离给予惩罚，距离越远惩罚越大
-        """
-        # 判断游戏结束的原因
-        is_victory = self.field.sum() == 0  # 所有食物被收集完毕
-        is_timeout = (self.current_step >= self._max_episode_steps)
-        
-        if is_victory:
-            # 胜利情况：根据步数给予奖励加成
-            self._apply_step_reward_bonus()
-        elif is_timeout:
-            # 失败情况：根据到食物距离给予惩罚
-            self._apply_distance_penalty()
-    
-    def _apply_step_reward_bonus(self):
-        """
-        胜利时根据步数给予奖励加成
-        步数越少，奖励加成越高
-        """
-        # 计算步数效率系数：(最大步数 - 当前步数) / 最大步数
-        # 这样步数越少，系数越大
-        step_efficiency = exp(-0.1 *(self._max_episode_steps - self.current_step) / self._max_episode_steps)
-        
-        player = self.players[0]    #仅为主智能体添加奖惩
-        # 只对有正奖励的玩家给予步数加成
-        if player.reward > 0:
-            step_bonus = player.reward * self.step_reward_factor * step_efficiency
-            player.reward += step_bonus
-
-            self.logger.debug(f"玩家 {player.name} 获得步数奖励加成: {step_bonus:.4f} "
-                            f"(效率系数: {step_efficiency:.4f}, 当前步数: {self.current_step})")
-    
-    def _apply_distance_penalty(self):
-        """
-        失败时根据智能体到最近食物的距离给予惩罚
-        距离越远，惩罚越大
-        """
-        # 计算场地的最大可能距离（对角线距离）
-        max_distance = self.rows + self.cols - 2
-        
-        player = self.players[0]    #仅为主智能体添加奖惩
-        # 计算到最近食物的距离
-        distance_to_food = self._distance_to_nearest_food(player.position)
-
-        # 计算距离惩罚：距离越远惩罚越大
-        # 使用归一化的距离比例
-        distance_ratio = exp(-0.1 *(distance_to_food / max_distance))
-        distance_penalty = self.distance_penalty_factor * distance_ratio
+                player.reward -= 0.5#float(player.level * food_level)
             
-        # 应用惩罚（减少奖励）
-        player.reward -= distance_penalty
-
-        self.logger.debug(f"玩家 {player.name} 获得距离惩罚: -{distance_penalty:.4f} "
-                        f"(距离: {distance_to_food}, 距离比例: {distance_ratio:.4f})")
+            # 可选的奖励标准化
+            """ if self._normalize_reward:
+                player.reward = player.reward / float(total_level * self._food_spawned) """
     
     def calculate_attraction_reward(self):
         """
@@ -1252,3 +1189,19 @@ class ForagingEnv(gym.Env):
         attraction_reward = 2 / (1 + np.exp(-avg_distance_change)) - 1
         
         return attraction_reward * self.attraction_reward_factor
+    
+    def _apply_step_reward_bonus(self):
+        """
+        胜利时根据步数给予奖励加成
+        使用指数衰减函数计算步数效率：exp(-decay_rate * current_step)
+        步数越多，奖励加成越低，且衰减速度呈指数增长
+        """
+        # 使用指数衰减函数计算步数效率
+        step_efficiency = np.exp(-self.decay_rate * self.current_step)
+        
+        player = self.players[0]    #仅为主智能体添加奖惩
+        # 只对有正奖励的玩家给予步数加成
+        if player.reward > 0:
+            step_bonus = player.reward * self.step_reward_factor * step_efficiency
+            player.reward += step_bonus
+    
