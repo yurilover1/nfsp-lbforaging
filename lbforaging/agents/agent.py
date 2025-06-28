@@ -18,11 +18,14 @@ class BaseAgent:
     def __getattr__(self, item):
         return getattr(self.player, item)
 
-    def _step(self, obs):
+    def _step(self, obs, is_train=False):
         # 兼容字典格式的观察
         if isinstance(obs, dict):
             # 保存动作到历史
-            action = self.step(obs)
+            if not is_train:
+                action = self.eval_step(obs)
+            else:
+                action = self.step(obs)
             if hasattr(self, 'history'):
                 self.history.append(action)
             return action

@@ -140,7 +140,7 @@ class PPOAgent:
         self.last_ego_action = action
         return action
     
-    def add_traj(self, traj):
+    def add_traj2buffer(self, traj):
         """
         与NFSP兼容的轨迹添加接口，适配env.run方法
         

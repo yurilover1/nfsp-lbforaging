@@ -1,8 +1,6 @@
 import numpy as np
 import time
 import os
-import matplotlib.pyplot as plt
-import gymnasium as gym
 import logging
 from tqdm import tqdm
 from evaluate import evaluate
@@ -21,7 +19,7 @@ def update_progress_bar(pbar, payoffs, recent_rewards, batch_rewards, batch_star
         batch_start_time: 批次开始时间
     """
     # 计算当前回合的团队奖励
-    team_reward = sum(payoffs)
+    team_reward = payoffs
     recent_rewards.append(team_reward)
     batch_rewards.append(team_reward)
     

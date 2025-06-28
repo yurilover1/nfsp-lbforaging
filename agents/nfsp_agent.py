@@ -4,10 +4,10 @@ import math
 import random
 from matplotlib import rcParams
 import os
-from lbforaging.agents import BaseAgent
+from .agent import BaseAgent
 from .model import dueling_ddqn, policy
 from .buffer import reservoir_buffer, n_step_replay_buffer, replay_buffer
-from .utils import action_mask
+from .utils import action_mask, action_mask_with_load_boost
 
 
 class NFSPAgent(BaseAgent):
@@ -26,6 +26,7 @@ class NFSPAgent(BaseAgent):
                 n_step=1,
                 gamma=0.99,
                 eta=0.1,
+                tau=0.005,  # 添加tau参数，用于目标网络软更新
                 rl_start=300,
                 sl_start=300,
                 train_freq=1,
@@ -45,6 +46,7 @@ class NFSPAgent(BaseAgent):
         self.n_step = n_step
         self.gamma = gamma
         self.eta = eta  # 决定使用哪种策略的概率
+        self.tau = tau  # 目标网络软更新系数
         self.rl_batch_size = rl_batch_size
         self.sl_batch_size = sl_batch_size
         self.update_freq = update_freq
@@ -180,16 +182,12 @@ class NFSPAgent(BaseAgent):
         """
         预处理观察到的状态
         处理三种类型的观察:
-        1. 三层观测模式 - 包含3个通道的5x5数组:
-           - 通道0: 当前智能体层
-           - 通道1: 友方智能体层
-           - 通道2: 食物层
-        2. 网格观察模式 - 包含4个通道的数组:
+        1. 网格观察模式 - 包含4个通道的数组:
            - 通道0: 智能体层，显示所有智能体的位置和等级
            - 通道1: 食物层，显示所有食物的位置和等级
            - 通道2: 可访问层，显示哪些位置可访问
            - 通道3: 自身标识层，标识自己的位置
-        3. 标准观察模式 - 包含field和players信息的结构化数据
+        2. 标准观察模式 - 包含field和players信息的结构化数据
         """
         # 如果已经是numpy数组，可能是预处理过的状态
         if isinstance(obs, np.ndarray):
@@ -200,9 +198,6 @@ class NFSPAgent(BaseAgent):
             # 确保是一维数组
             elif len(obs.shape) == 1:
                 return obs.astype(np.float32)
-            else:
-                # 展平任何其他维度的数组
-                return obs.reshape(-1).astype(np.float32)
         
         # 如果是字典格式，提取'obs'键
         if isinstance(obs, dict) and 'obs' in obs:
@@ -210,97 +205,56 @@ class NFSPAgent(BaseAgent):
             # 递归处理提取的观察
             return self._preprocess_state(raw_obs)
         
-        # 尝试获取可能的属性
-        state_vector = []
-        
-        # 尝试提取field属性
-        if hasattr(obs, 'field'):
-            try:
-                field = obs.field
-                # 确保field是数组类型并可以展平
-                if hasattr(field, 'flatten'):
-                    state_vector.extend(field.flatten())
-            except Exception as e:
-                print(f"处理field时出错: {e}")
-        
-        # 尝试提取players属性
-        if hasattr(obs, 'players') and hasattr(obs.players, '__iter__'):
-            try:
-                for player in obs.players:
-                    # 尝试提取玩家位置
-                    if hasattr(player, 'position'):
-                        state_vector.extend(player.position)
-                    # 尝试提取玩家等级
-                    if hasattr(player, 'level'):
-                        state_vector.append(player.level)
-                    # 检查是否是自己
-                    is_self = 1.0 if hasattr(player, 'is_self') and player.is_self else 0.0
-                    state_vector.append(is_self)
-            except Exception as e:
-                print(f"处理players时出错: {e}")
-        
-        # 如果提取到了属性，返回状态向量
-        if state_vector:
-            return np.array(state_vector, dtype=np.float32)
-        
-        # 如果没有提取到任何信息，可能是自定义格式，尝试直接使用
-        if hasattr(obs, 'shape'):
-            # 可能是形状多维的张量，展平
-            return np.array(obs).reshape(-1).astype(np.float32)
-        
-        # 如果是其他可迭代对象，尝试转换为numpy数组
-        if hasattr(obs, '__iter__'):
-            try:
-                return np.array(list(obs), dtype=np.float32)
-            except Exception as e:
-                print(f"转换观察为数组时出错: {e}")
-        
-        # 最后的后备方案：创建一个默认状态
-        print("警告: 无法处理观察，使用默认状态")
-        return np.zeros(100, dtype=np.float32)
-    
-    def rl_train(self):
+    def rl_train(self, train_num):
         """训练Q网络 (RL)"""
         # 确保网络已初始化且缓冲抵达训练要求
-        if not hasattr(self, 'networks_initialized') or not \
-            self.networks_initialized or len(self.sl_buffer) <= self.sl_start:
+        if not self.networks_initialized or len(self.rl_buffer) <= self.rl_start:
             return
-            
-        observation, action, reward, next_observation, done = self.rl_buffer.sample(self.rl_batch_size)
         
-        # 使用模型中的train方法进行训练
-        self.rl_eval_network.train(
-            observation=observation,
-            action=action,
-            reward=reward,
-            next_observation=next_observation,
-            done=done,
-            target_network=self.rl_target_network,
-            optimizer=self.rl_optimizer,
-            gamma=self.gamma,
-            count=self.count,
-            update_freq=self.update_freq,
-            losses=self.RLlosses
-        )
+        self.count += train_num
+
+        for _ in range(train_num):    
+            observation, action, reward, next_observation, done = self.rl_buffer.sample(self.rl_batch_size)
+
+            # 使用模型中的train方法进行训练
+            self.rl_eval_network.train(
+                observation=observation,
+                action=action,
+                reward=reward,
+                next_observation=next_observation,
+                done=done,
+                target_network=self.rl_target_network,
+                optimizer=self.rl_optimizer,
+                gamma=self.gamma,
+                count=self.count,
+                update_freq=self.update_freq,
+                tau=self.tau,  # 传递tau参数
+                losses=self.RLlosses,
+                clip_grad_norm=1.0
+            )
+
+        self.rl_eval_network.soft_update(self.rl_target_network, self.tau)
+        # 根据网络层数调整清空频率：层数越多，保留数据时间越长
+        clear_interval = 2#bvcxlmax(10, self.layers * 3)  # 基础间隔10，每增加一层增加3个间隔
+        if self.count % clear_interval == 0:
+            self.rl_buffer.clear()
     
-    def sl_train(self):
+    def sl_train(self, train_num):
         """训练策略网络 (SL)"""
         # 确保网络已初始化
         if not hasattr(self, 'networks_initialized') or not \
             self.networks_initialized or len(self.sl_buffer) < self.sl_start:
             return
-            
-        observation, action = self.sl_buffer.sample(self.sl_batch_size)
         
-        self.losses.append(self.sl_policy.train(
-            observation, action, self.policy_accuracies, self.sl_optimizer))
+        for _ in range(train_num):
+            
+            observation, action = self.sl_buffer.sample(self.sl_batch_size)
+            
+            self.losses.append(self.sl_policy.train(
+                observation, action, self.policy_accuracies, self.sl_optimizer))
     
     def step(self, obs):
         """根据观察选择动作，支持字典格式的observation"""
-        # 若为训练则计数加1
-        if (not self.eval_flag):
-            self.count += 1
-        
         # 预处理状态
         state = self._preprocess_state(obs)
         
@@ -328,13 +282,9 @@ class NFSPAgent(BaseAgent):
         # 过滤不合法的动作
         valid_probs = action_mask(probs, legal_actions)
         
-        # 选择动作
-        if r_flag:
-            action = np.argmax(valid_probs)
-        else:
-            action = np.random.choice(len(valid_probs), p=valid_probs)
-        return action
-    
+        return np.argmax(valid_probs) if r_flag else np.random.choice(
+            len(valid_probs), p=valid_probs)
+        
     def eval_step(self, obs):
         """评估时选择动作，支持字典格式的observation"""
         #将策略模式设为评估模式
@@ -347,17 +297,15 @@ class NFSPAgent(BaseAgent):
         将轨迹添加到经验缓冲区
         轨迹是包含state, action, reward, next_state, done等信息的转换样本列表
         """
-        # 确认轨迹是单个转换样本，而不是列表
-        if isinstance(traj, list) and len(traj) == 5:
-            state, action, reward, next_state, done = traj
-            # state = self._preprocess_state(state)
-            # next_state = self._preprocess_state(next_state)
-            # 使用标准缓冲区方法添加经验
-            self.rl_buffer.store(state, action, reward, next_state, done)
-            
-            # 记录观察和行动对，用于监督学习缓冲区
-            if self.policy_mode == 'best':
-                self.sl_buffer.store(state, action)
+        state, action, reward, next_state, done = traj
+        # state = self._preprocess_state(state)
+        # next_state = self._preprocess_state(next_state)
+        # 使用标准缓冲区方法添加经验
+        self.rl_buffer.store(state, action, reward, next_state, done)
+        
+        # 记录观察和行动对，用于监督学习缓冲区
+        if self.policy_mode == 'best':
+            self.sl_buffer.store(state, action)
                    
     def save_models(self, path="./models", teamate_id=0):
         """保存模型"""

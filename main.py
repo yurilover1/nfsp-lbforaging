@@ -1,11 +1,11 @@
-import os
 import argparse
 import gymnasium as gym
 import logging
-# import lbforaging  # noqa
+import lbforaging
 from utils import *
 from train import train_agents
 from test import test_agents
+from agents.nfsp_agent import NFSPAgent
 import torch
 
 

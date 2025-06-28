@@ -89,5 +89,5 @@ def plot_layers_comparison(layer_nums, type='nfsp'):
 
 if __name__ == "__main__":
     # 示例用法
-    layer_nums = [3]  # 要比较的网络层数
+    layer_nums = [7]  # 要比较的网络层数
     plot_layers_comparison(layer_nums, type='nfsp')

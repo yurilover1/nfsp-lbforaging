@@ -127,6 +127,11 @@ class dueling_ddqn(nn.Module):
             random_flag = True
 
         return probs, random_flag
+
+    def soft_update(self, target_network, tau):
+        """<UNK>"""
+        for target_param, param in zip(target_network.parameters(), target_network.parameters()):
+            target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
         
     def train(self, observation, action, reward, next_observation, done,
               target_network, optimizer, gamma=0.99, count=0, update_freq=1000, tau=0.005, losses=None, clip_grad_norm=1.0):
@@ -182,13 +187,7 @@ class dueling_ddqn(nn.Module):
         if clip_grad_norm is not None and clip_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(self.parameters(), clip_grad_norm)
         
-        optimizer.step() 
-        
-        # 定期更新目标网络
-        if count % update_freq == 0:
-            # 软更新目标网络
-            for target_param, param in zip(target_network.parameters(), self.parameters()):
-                target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+        optimizer.step()
             
         return loss.item()
 

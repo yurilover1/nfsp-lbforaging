@@ -2,10 +2,7 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import logging
-import torch
-from agents.nfsp_agent import NFSPAgent
-from agents.ppo_agent import PPOAgent
-from partners.agent import SimpleAgent2
+from agents.partner_agent import SimpleAgent2
 import random
 
 # 添加从nfsp_run.py移动的函数
@@ -19,43 +16,10 @@ def teammate_generate(action_size, device, id=random.randint(0, 7)):
         output_dim=action_size,
         device=device
     )
-    model_path = f'./partners/agents_for_5*5/agent_{id}_1.pt'
+    model_path = f'./partners/agents_for_5x5/agent_{id}_1.pt'
     teammate_agent.load_model(model_path)
 
     return teammate_agent
-
-
-def create_agent(agent_type, player, state_size, action_size, layers, device):
-    """创建指定类型的智能体"""
-    agent_dir = f"./models/agent0"
-    os.makedirs(agent_dir, exist_ok=True)
-
-    if agent_type.lower() == "nfsp":
-        # 创建NFSP智能体
-        agent = NFSPAgent(
-            player=player,
-            state_size=state_size, action_size=action_size,
-            epsilon_init=0.3, epsilon_decay=10000, epsilon_min=0.05,
-            update_freq=1, sl_lr=0.005, rl_lr=1e-4,
-            sl_buffer_size=20000, rl_buffer_size=80000,
-            rl_start=1000, sl_start=1000, train_freq=10, gamma=0.98, eta=0.0,
-            rl_batch_size=256, sl_batch_size=256, hidden_units=256, tau=0.1,
-            layers=layers, device=device, eval_mode='best'
-        )
-        return agent
-    elif agent_type.lower() == "ppo":
-        # 创建PPO智能体``
-        agent = PPOAgent(
-            input_dim=12,  # 输入维度为12
-            hidden_dims=[128, 128],
-            output_dim=action_size,
-            device=device,
-            player=player,  # 传递player信息,
-            lambda_=0.95, gamma=0.99
-        )
-        return agent
-    else:
-        raise ValueError(f"不支持的智能体类型: {agent_type}")
 
 def calculate_state_size(env):
     """计算环境的状态大小"""

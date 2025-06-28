@@ -20,6 +20,11 @@ class replay_buffer:
         if self.buffer_size == len(self.buffer):
             self.buffer.popleft()
         self.buffer.append((state, action, reward, next_state, done))
+
+    def print(self):
+        """<UNK>"""
+        for state, action, reward, next_state, done in self.buffer:
+            print(state, action, reward, next_state, done)
     
     def sample(self, batch_size):
         """从缓冲区随机采样一批经验"""

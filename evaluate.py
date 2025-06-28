@@ -26,7 +26,7 @@ def evaluate(env, agents, eval_episodes=100, eval_env=None):
     total_rewards = 0
     for _ in range(eval_episodes):
         _, payoffs, steps = eval_env.run(agents, is_training=False)
-        total_rewards += payoffs.sum()
+        total_rewards += payoffs
     # 计算平均奖励
     avg_rewards = total_rewards/ eval_episodes
 
