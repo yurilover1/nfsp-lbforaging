@@ -1,14 +1,12 @@
-from collections import namedtuple, defaultdict, deque
-from enum import Enum
-from itertools import product
 import logging
 import time
+from collections import namedtuple, defaultdict, deque
+from enum import Enum
 from typing import Iterable
-from math import exp as exp
 
 import gymnasium as gym
-from gymnasium.utils import seeding
 import numpy as np
+from gymnasium.utils import seeding
 
 
 class Action(Enum):
@@ -891,6 +889,8 @@ class ForagingEnv(gym.Env):
                 self.render()
                 time.sleep(sleep_time)
 
+
+
         # 添加轨迹到经验缓冲区
         if is_training and trajectories and hasattr(player.controller, 'add_traj2buffer'):
             for ts in trajectories:
@@ -1130,9 +1130,11 @@ class ForagingEnv(gym.Env):
                 if success:
                     # 加载成功 - 分配奖励
                     player.reward += 0.5  # float(player.level * food_level)
-            
-            if not player.reward:
-                player.reward = -1
+
+        if player.reward == 1.0:
+            pass
+        if not player.reward:
+            player.reward = -1
     
     def _calculate_attraction_reward(self):
         """
@@ -1142,7 +1144,7 @@ class ForagingEnv(gym.Env):
         if not self.agent_positions_history or not self.food_positions_history:
             return 0.0
             
-        # 计算智能体到食物的平均距离变化
+        # 计算智能体到食物的平均距离变化    
         total_distance_change = 0
         valid_steps = 0
         
@@ -1150,7 +1152,8 @@ class ForagingEnv(gym.Env):
             
             # 获取当前步骤的食物位置
             current_food_positions = self.food_positions_history[i]
-            if len(current_food_positions) == 0:  # 如果没有食物，跳过
+            if (len(current_food_positions) == 0 or
+                len(self.food_positions_history[i]) != len(self.food_positions_history[i - 1])):  # 如果没有食物，跳过
                 continue
                 
             # 计算当前步骤到最近食物的距离
@@ -1182,6 +1185,9 @@ class ForagingEnv(gym.Env):
         
         # 使用sigmoid函数将距离变化映射到[-1, 1]区间
         attraction_reward = 2 / (1 + np.exp(-avg_distance_change)) - 1
+
+        self.agent_positions_history.clear()
+        self.food_positions_history.clear()
         
         return attraction_reward * self.attraction_reward_factor
     
