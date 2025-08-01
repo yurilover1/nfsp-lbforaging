@@ -1,195 +1,6 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import torch
-
-
-class dueling_ddqn(nn.Module):
-    """双重网络(Dueling Network)结构的深度Q网络"""
-    
-    def __init__(self, state_size, action_size, hidden_units=256, num_layers=3, activation='LeakyReLU'):
-        """初始化参数和构建模型"""
-        super(dueling_ddqn, self).__init__()
-        
-        # 处理hidden_units参数，确保其为整数
-        if isinstance(hidden_units, (list, tuple)):
-            hidden_size = hidden_units[0] if hidden_units else 256
-        else:
-            hidden_size = hidden_units
-            
-        # 特征提取层
-        self.feature = self._build_feature_layers(state_size, hidden_size, num_layers, activation)
-        
-        # 优势流 - 简化网络结构
-        self.advantage = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size//2),
-            self._get_activation(activation, 0.1),
-            nn.Dropout(0.05),
-            
-            nn.Linear(hidden_size//2, action_size)
-        )
-        
-        # 状态值流 - 简化网络结构
-        self.value = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size//2),
-            self._get_activation(activation, 0.1),
-              nn.Dropout(0.05),
-            
-            nn.Linear(hidden_size//2, 1)
-        )
-        
-        # 使用Xavier初始化方法
-        self._init_weights()
-
-    def _get_activation(self, activation_name, negative_slope=0.1):
-        """获取激活函数实例"""
-        if activation_name == 'LeakyReLU':
-            return nn.LeakyReLU(negative_slope)
-        elif activation_name == 'ReLU':
-            return nn.ReLU()
-        elif activation_name == 'GELU':
-            return nn.GELU()
-        elif activation_name == 'ELU':
-            return nn.ELU()
-        elif activation_name == 'SELU':
-            return nn.SELU()
-        elif activation_name == 'Tanh':
-            return nn.Tanh()
-        else:
-            # 默认使用LeakyReLU
-            return nn.LeakyReLU(negative_slope)
-
-    def _repeat_layer(self, input_size, output_size, activation='LeakyReLU', use_layer_norm=True, dropout_rate=0.1):
-        """创建一个可重复使用的网络层，包括线性层、归一化、激活函数和Dropout"""
-        layers = [nn.Linear(input_size, output_size)]
-        
-        if use_layer_norm:
-            layers.append(nn.LayerNorm(output_size))
-            
-        layers.append(self._get_activation(activation))
-        
-        if dropout_rate > 0:
-            layers.append(nn.Dropout(dropout_rate))
-            
-        return nn.Sequential(*layers)
-        
-    def _build_feature_layers(self, input_size, hidden_size, num_layers, activation):
-        """构建特征提取层，支持动态层数调整"""
-        if num_layers < 1:
-            num_layers = 1  # 至少有一层
-        elif num_layers > 10:
-            num_layers = 10  # 最多10层
-            
-        layers = []
-        # 第一层，输入层到隐藏层
-        layers.append(self._repeat_layer(input_size, hidden_size, activation))
-        
-        # 中间层，隐藏层到隐藏层
-        for _ in range(num_layers - 1):
-            layers.append(self._repeat_layer(hidden_size, hidden_size, activation))
-            
-        return nn.Sequential(*layers)
-        
-    def _init_weights(self):
-        """使用Xavier初始化权重，提高训练稳定性"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        
-    def forward(self, x):
-        """前向传播"""
-        feature = self.feature(x)
-        advantage = self.advantage(feature)
-        value = self.value(feature)
-        return value + advantage - advantage.mean(1, keepdim=True)
-    
-    def act(self, state, epsilon=0):
-        """使用ε-贪婪策略选择动作"""
-        # 获取Q值
-        q_values = self.forward(state).detach().cpu().numpy()[0]
-        
-        # ε-贪婪动作选择
-        if np.random.random() < epsilon:
-            # 随机探索
-            probs = np.ones(len(q_values)) / len(q_values)
-            random_flag = False
-        else:
-            # 贪婪策略，但使用softmax生成更好的概率分布
-            temperature = 0.1  # 增加温度使分布更平滑
-            scaled_q_values = q_values / temperature
-            exp_q = np.exp(scaled_q_values - np.max(scaled_q_values))  # 减去最大值以避免数值溢出
-            probs = exp_q / np.sum(exp_q)
-            random_flag = True
-
-        return probs, random_flag
-
-    def soft_update(self, target_network, tau):
-        """<UNK>"""
-        for target_param, param in zip(target_network.parameters(), target_network.parameters()):
-            target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
-        
-    def train(self, observation, action, reward, next_observation, done,
-              target_network, optimizer, gamma=0.99, count=0, update_freq=1000, tau=0.005, losses=None, clip_grad_norm=1.0):
-        """训练网络
-        
-        参数:
-            observation: 当前观察状态
-            action: 采取的动作
-            reward: 获得的奖励
-            next_observation: 下一个观察状态
-            done: 是否结束
-            target_network: 目标网络
-            optimizer: 优化器
-            gamma: 折扣因子
-            count: 当前训练计数
-            update_freq: 目标网络更新频率
-            tau: 软更新系数
-            losses: 损失记录列表
-            clip_grad_norm: 梯度裁剪的最大范数，None表示不进行梯度裁剪
-        
-        返回:
-            loss: 当前批次的损失值
-        """
-        device = next(self.parameters()).device
-        
-        # 将数据转换为tensor并移动到对应设备
-        observation = torch.FloatTensor(observation).to(device)
-        action = torch.LongTensor(action).to(device)
-        reward = torch.FloatTensor(reward).to(device)
-        next_observation = torch.FloatTensor(next_observation).to(device)
-        done = torch.FloatTensor(done).to(device)
-        
-        # 计算当前Q值
-        q_values = self.forward(observation)
-        next_q_values = target_network.forward(next_observation)
-        argmax_actions = self.forward(next_observation).max(1)[1].detach()
-        next_q_value = next_q_values.gather(1, argmax_actions.unsqueeze(1)).squeeze(1)
-        q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
-        
-        # 计算目标Q值
-        expected_q_value = reward + gamma * ( 1 - done) * next_q_value
-        
-        # 计算损失
-        loss = (q_value - expected_q_value.detach()).pow(2).mean()
-        if losses is not None:
-            losses.append(loss.item())
-        
-        # 优化模型
-        optimizer.zero_grad()
-        loss.backward()
-        
-        # 梯度裁剪 - 防止梯度爆炸
-        if clip_grad_norm is not None and clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.parameters(), clip_grad_norm)
-        
-        optimizer.step()
-            
-        return loss.item()
 
 
 class policy(nn.Module):
@@ -319,3 +130,40 @@ class policy(nn.Module):
         optimizer.step()
         
         return loss.item()
+
+class ActorNet(nn.Module):
+    def __init__(self, input_dim, hidden_dims=None, output_dim=6):
+        super().__init__()
+        if hidden_dims is None:
+            hidden_dims = [256, 256, 256]
+        layers = []
+        prev_dim = input_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h))
+            layers.append(nn.LeakyReLU(0.1))
+            prev_dim = h
+        self.net = nn.Sequential(*layers)
+        self.out = nn.Linear(prev_dim, output_dim)
+    def forward(self, x, temperature=1.0):
+        x = self.net(x)
+        logits = self.out(x)
+        if temperature != 1.0:
+            logits = logits / temperature
+        return F.softmax(logits, dim=-1)
+
+class CriticNet(nn.Module):
+    def __init__(self, input_dim, hidden_dims=None):
+        super().__init__()
+        if hidden_dims is None:
+            hidden_dims = [256, 256, 256]
+        layers = []
+        prev_dim = input_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h))
+            layers.append(nn.LeakyReLU(0.1))
+            prev_dim = h
+        self.net = nn.Sequential(*layers)
+        self.out = nn.Linear(prev_dim, 1)
+    def forward(self, x):
+        x = self.net(x)
+        return self.out(x)

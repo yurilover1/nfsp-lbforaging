@@ -2,19 +2,20 @@ from setuptools import setup, find_packages
 
 setup(
     name="lbforaging",
-    version="3.0.0",
+    version="4.0.0",
     description="Level Based Foraging Environment",
     author="yurilover1",
     url="https://github.com/yurilover1/nfsp-lbforaging",
     packages=find_packages(exclude=["contrib", "docs", "tests"]),
     classifiers=[
         "Intended Audience :: Developers",
-        "Programming Language :: Python :: 3.4",
-        "Programming Language :: Python :: 3.5",
-        "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11"
     ],
-    install_requires=["numpy", "gymnasium", "pyglet<2", "six"],
+    install_requires=["numpy", "gymnasium", "six"],
     extras_require={"test": ["pytest"]},
     include_package_data=True,
 )

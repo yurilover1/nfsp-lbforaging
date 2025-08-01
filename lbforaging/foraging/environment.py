@@ -1,11 +1,12 @@
 import time
 from collections import deque
 from enum import Enum
+
 import gymnasium as gym
 import numpy as np
 from gymnasium.utils import seeding
 
-from .types import FieldType, FieldPoint, Field
+from .types import Field, Player
 
 
 class Action(Enum):
@@ -16,6 +17,13 @@ class Action(Enum):
     EAST = 4
     LOAD = 5
 
+# 动作到位置偏移的映射
+ACTION_TO_OFFSET = {
+    Action.NORTH: (-1, 0),
+    Action.SOUTH: (1, 0),
+    Action.WEST: (0, -1),
+    Action.EAST: (0, 1),
+}
 
 class ForagingEnv(gym.Env):
     """
@@ -47,15 +55,20 @@ class ForagingEnv(gym.Env):
         observe_agent_levels=True,
         render_mode=None,
         step_reward_factor=0.1,
-        attraction_reward_factor=0.5,
+        attraction_reward_factor=0.1,
         decay_rate=0.01,
         seed=None,
+        verbose=False,
     ):
         self.render_mode = render_mode
         self.num_agents = num_agents
+        self.verbose = verbose
         
         # 使用Field类集中管理环境状态
         self.field = Field(field_size)
+        
+        # 玩家对象列表
+        self.players = []
         
         # 奖励参数
         self.step_reward_factor = step_reward_factor
@@ -65,19 +78,17 @@ class ForagingEnv(gym.Env):
         # 位置历史记录
         self.agent_positions_history = []
         self.food_positions_history = []
+        self.step_attraction_rewards = []  # 每步吸引力奖励记录
 
         # 食物等级配置
-        self.min_food_level = np.array(min_food_level) if hasattr(min_food_level, '__iter__') else np.array([min_food_level] * max_num_food)
-        if max_food_level is not None:
-            self.max_food_level = np.array(max_food_level) if hasattr(max_food_level, '__iter__') else np.array([max_food_level] * max_num_food)
-        else:
-            self.max_food_level = None
+        self.min_food_level = self._ensure_array(min_food_level, max_num_food)
+        self.max_food_level = self._ensure_array(max_food_level, max_num_food) if max_food_level is not None else None
         self.max_num_food = max_num_food
         self._food_spawned = 0.0
 
         # 智能体等级配置
-        self.min_player_level = np.array(min_player_level) if hasattr(min_player_level, '__iter__') else np.array([min_player_level] * num_agents)
-        self.max_player_level = np.array(max_player_level) if hasattr(max_player_level, '__iter__') else np.array([max_player_level] * num_agents)
+        self.min_player_level = self._ensure_array(min_player_level, num_agents)
+        self.max_player_level = self._ensure_array(max_player_level, num_agents)
 
         self.sight = sight
         self.force_coop = force_coop
@@ -110,58 +121,122 @@ class ForagingEnv(gym.Env):
         # 设置随机种子
         if seed is not None:
             self._np_random, seed = seeding.np_random(seed)
+        else:
+            self._np_random, _ = seeding.np_random(None)
+
+        # 确保环境初始化时生成食物
+        self._spawn_food()
+
+        # 有效/无效动作统计
+        self.valid_action_count = 0
+        self.invalid_action_count = 0
 
     def _get_field_int_representation(self):
         """获取field的整数表示，用于兼容性"""
         return self.field.to_int_array()
 
+    def set_player_agents(self, agents):
+        """为玩家设置智能体对象"""
+        for i, agent in enumerate(agents):
+            if i < len(self.players):
+                self.players[i].agent = agent
+    
+    def _get_ego_player(self):
+        """获取ego玩家（第一个玩家）"""
+        return self.players[0] if len(self.players) > 0 else None
+
+    def distribute_rewards(self, rewards):
+        """为ego玩家分发奖励（仅给主玩家奖励）"""
+        ego_player = self._get_ego_player()
+        if ego_player:
+            if isinstance(rewards, (int, float)):
+                ego_player.add_reward(rewards)
+            elif isinstance(rewards, (list, tuple)) and len(rewards) > 0:
+                ego_player.add_reward(rewards[0])
+    
+    def reset_player_rewards(self):
+        """重置ego玩家的奖励"""
+        ego_player = self._get_ego_player()
+        if ego_player:
+            ego_player.reset_reward()
+
+    @staticmethod
+    def _ensure_array(value, size):
+        """确保值是指定大小的数组"""
+        if hasattr(value, '__iter__') and not isinstance(value, str):
+            return np.array(value)
+        return np.array([value] * size)
+
+    @staticmethod
+    def _calculate_new_position(current_pos, action):
+        """计算动作后的新位置"""
+        # 将整数动作转换为Action枚举
+        if isinstance(action, int):
+            try:
+                action_enum = Action(action)
+            except ValueError:
+                return current_pos
+        else:
+            action_enum = action
+        
+        if action_enum in ACTION_TO_OFFSET:
+            offset = ACTION_TO_OFFSET[action_enum]
+            new_pos = (current_pos[0] + offset[0], current_pos[1] + offset[1])
+            return new_pos
+        else:
+            return current_pos
+
     #==============================
-    # 智能体访问属性（委托给Field类）
+    # 玩家访问属性（委托给Field类和Player对象）
     #==============================
     
     @property
     def agent_positions(self):
-        """动态生成智能体位置列表"""
+        """动态生成玩家位置列表（保持向后兼容）"""
         positions = []
-        for agent_id in range(self.num_agents):
-            pos = self.field.get_agent_position(agent_id)
+        for player_id in range(self.num_agents):
+            pos = self.field.get_player_position(player_id)
             positions.append(pos if pos is not None else (0, 0))
         return positions
     
     @property
     def agent_levels(self):
-        """动态生成智能体等级列表"""
+        """动态生成玩家等级列表（保持向后兼容）"""
         levels = []
-        for agent_id in range(self.num_agents):
-            level = self.field.get_agent_level(agent_id)
+        for player_id in range(self.num_agents):
+            level = self.field.get_player_level(player_id)
             levels.append(level if level > 0 else 1)
         return levels
     
-    def get_agent_position_from_field(self, agent_id):
-        """根据智能体ID获取其位置"""
-        return self.field.get_agent_position(agent_id)
+    def get_agent_position_from_field(self, player_id):
+        """根据玩家ID获取其位置（保持向后兼容）"""
+        return self.field.get_player_position(player_id)
     
-    def get_agent_level_from_field(self, agent_id):
-        """根据智能体ID获取其等级"""
-        return self.field.get_agent_level(agent_id)
+    def get_agent_level_from_field(self, player_id):
+        """根据玩家ID获取其等级（保持向后兼容）"""
+        return self.field.get_player_level(player_id)
+    
+    def get_player_object(self, player_id):
+        """根据玩家ID获取Player对象"""
+        return self.field.get_player_object(player_id)
     
     def get_agent_at_position(self, position):
-        """获取指定位置的智能体ID，如果没有智能体返回None"""
+        """获取指定位置的玩家ID，如果没有玩家返回None"""
         row, col = position
         try:
-            agent_id = self.field.get_agent_id(row, col)
-            return agent_id if agent_id >= 0 else None
+            player_id = self.field.get_player_id(row, col)
+            return player_id if player_id >= 0 else None
         except IndexError:
             return None
     
     def is_agent_at_position(self, position):
-        """检查指定位置是否有智能体"""
+        """检查指定位置是否有玩家"""
         return self.get_agent_at_position(position) is not None
     
     def get_agents_in_area(self, center_position, radius):
-        """获取指定区域内的所有智能体ID列表"""
+        """获取指定区域内的所有玩家ID列表"""
         center_row, center_col = center_position
-        return self.field.get_agents_in_area(center_row, center_col, radius)
+        return self.field.get_players_in_area(center_row, center_col, radius)
 
     #==============================
     # 观测生成方法
@@ -172,8 +247,17 @@ class ForagingEnv(gym.Env):
         observations = []
         
         for agent_idx in range(self.num_agents):
-            obs = np.zeros(self.observation_space[0].shape, dtype=np.float32)
+            # 获取智能体位置
             agent_pos = self.agent_positions[agent_idx]
+            
+            # 如果智能体位置无效，生成空观测
+            if agent_pos is None:
+                obs = np.zeros(self.observation_space[0].shape, dtype=np.float32)
+                observations.append(obs)
+                continue
+                
+            # 创建观测向量
+            obs = np.zeros(self.observation_space[0].shape, dtype=np.float32)
             
             # 获取智能体视野内的食物信息
             local_foods = self._get_local_field(agent_pos)
@@ -181,8 +265,12 @@ class ForagingEnv(gym.Env):
             # 填充食物信息
             self._fill_food_info(obs, local_foods)
             
-            # 填充智能体信息
-            self._fill_agent_info(obs, agent_idx, agent_pos)
+            # 填充智能体信息（已修改为将观察者放在第一位）
+            self._fill_agent_info(obs, agent_pos)
+            
+            # 添加调试信息
+            if hasattr(self, 'verbose') and self.verbose:
+                print(f"智能体{agent_idx}的观测: 形状={obs.shape}, 内容={obs}")
             
             observations.append(obs)
             
@@ -210,28 +298,43 @@ class ForagingEnv(gym.Env):
         return local_foods
 
     def _fill_food_info(self, obs, local_foods):
-        """填充食物信息到观测向量"""
+        """填充食物信息到观测向量（一维数组，每个食物3个元素）"""
         for i in range(self.max_num_food):
             base_idx = 3 * i
             if i < len(local_foods):
-                y, x, level = local_foods[i]
-                obs[base_idx:base_idx + 3] = [y, x, level]
+                rel_i, rel_j, level = local_foods[i]
+                obs[base_idx:base_idx + 3] = [rel_i, rel_j, level]
             else:
                 obs[base_idx:base_idx + 3] = [-1, -1, 0]
 
-    def _fill_agent_info(self, obs, observer_idx, observer_pos):
-        """填充智能体信息到观测向量"""
+    def _fill_agent_info(self, obs, observer_pos):
+        """填充玩家信息到观测向量"""
         start_idx = self.max_num_food * 3
         agent_obs_len = 3 if self._observe_agent_levels else 2
         
+        # 获取观察者ID
+        observer_id = None
         for i in range(self.num_agents):
-            base_idx = start_idx + agent_obs_len * i
-            agent_pos = self.get_agent_position_from_field(i)
+            if self.get_agent_position_from_field(i) == observer_pos:
+                observer_id = i
+                break
+        
+        # 如果找不到观察者ID，使用默认顺序
+        if observer_id is None:
+            agent_order = list(range(self.num_agents))
+        else:
+            # 将观察者放在第一位
+            agent_order = [observer_id] + [i for i in range(self.num_agents) if i != observer_id]
+        
+        # 按照重新排序后的顺序填充智能体信息
+        for idx, i in enumerate(agent_order):
+            base_idx = start_idx + agent_obs_len * idx
+            player_pos = self.get_agent_position_from_field(i)
             
             # 检查是否在视野内
-            if agent_pos and self._in_sight(observer_pos, agent_pos):
+            if player_pos and self._in_sight(observer_pos, player_pos):
                 # 转换为相对坐标
-                rel_pos = self._to_relative_pos(observer_pos, agent_pos)
+                rel_pos = self._to_relative_pos(observer_pos, player_pos)
                 obs[base_idx:base_idx + 2] = rel_pos
                 if self._observe_agent_levels:
                     obs[base_idx + 2] = self.get_agent_level_from_field(i)
@@ -268,17 +371,15 @@ class ForagingEnv(gym.Env):
     def _gen_valid_actions(self):
         """计算每个智能体的有效动作"""
         self._valid_actions = []
+        movement_actions = [Action.NORTH, Action.SOUTH, Action.WEST, Action.EAST]
+        
         for agent_idx in range(self.num_agents):
-            valid_actions = []
+            valid_actions = [Action.NONE]  # NONE总是有效
             agent_pos = self.get_agent_position_from_field(agent_idx)
             
-            # NONE总是有效
-            valid_actions.append(Action.NONE)
-            
             # 检查移动动作
-            for action in [Action.NORTH, Action.SOUTH, Action.WEST, Action.EAST]:
-                if self._is_valid_move_action(agent_idx, action):
-                    valid_actions.append(action)
+            valid_actions.extend(action for action in movement_actions 
+                               if self._is_valid_move_action(agent_idx, action))
                     
             # 检查加载动作
             if self._can_load(agent_pos):
@@ -291,16 +392,7 @@ class ForagingEnv(gym.Env):
         pos = self.get_agent_position_from_field(agent_idx)
         if pos is None:
             return False
-        if action == Action.NORTH:
-            new_pos = (pos[0] - 1, pos[1])
-        elif action == Action.SOUTH:
-            new_pos = (pos[0] + 1, pos[1])
-        elif action == Action.WEST:
-            new_pos = (pos[0], pos[1] - 1)
-        elif action == Action.EAST:
-            new_pos = (pos[0], pos[1] + 1)
-        else:
-            return False
+        new_pos = self._calculate_new_position(pos, action)
             
         return self._is_valid_position(new_pos)
 
@@ -331,35 +423,31 @@ class ForagingEnv(gym.Env):
     # 智能体移动和field更新
     #==============================
 
-    def _process_agent_movement(self, agent_idx, action):
-        """处理智能体移动"""
-        if action == Action.LOAD:
-            return True  # 返回True表示是加载动作
-        elif action in [Action.NORTH, Action.SOUTH, Action.WEST, Action.EAST]:
-            # 计算新位置
-            pos = self.field.get_agent_position(agent_idx)
+    def _process_agent_movement(self, player_idx, action):
+        """处理玩家移动"""
+        # 统计动作有效性
+        if action == Action.LOAD.value:
+            self.valid_action_count += 1
+            return True  # 表示动作已处理，奖励逻辑在后续步骤处理
+        elif action == Action.NONE.value:
+            # NONE动作总是有效的，表示智能体选择不移动
+            self.valid_action_count += 1
+            return False
+        elif action in [Action.NORTH.value, Action.SOUTH.value, Action.WEST.value, Action.EAST.value]:
+            pos = self.field.get_player_position(player_idx)
             if pos is None:
+                self.invalid_action_count += 1
                 return False
-                
-            if action == Action.NORTH:
-                new_pos = (pos[0] - 1, pos[1])
-            elif action == Action.SOUTH:
-                new_pos = (pos[0] + 1, pos[1])
-            elif action == Action.WEST:
-                new_pos = (pos[0], pos[1] - 1)
-            elif action == Action.EAST:
-                new_pos = (pos[0], pos[1] + 1)
-            
-            if self._is_valid_position(new_pos):
-                # 使用Field类的移动方法
-                self.field.move_agent(agent_idx, new_pos[0], new_pos[1])
-                
+            new_pos = self._calculate_new_position(pos, action)
+            can_move = self._is_valid_position(new_pos)
+            if can_move:
+                self.field.move_player(player_idx, new_pos[0], new_pos[1])
+                self.valid_action_count += 1
+            else:
+                self.invalid_action_count += 1
+        else:
+            self.invalid_action_count += 1
         return False  # 返回False表示不是加载动作
-
-    def _update_field(self):
-        """更新field以反映智能体位置"""
-        # Field类自动维护状态，此方法保留以保持兼容性
-        pass
 
     #==============================
     # 环境重置和初始化
@@ -367,119 +455,135 @@ class ForagingEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         """重置环境"""
+        self.current_step = 0
         if seed is not None:
             self._np_random, seed = seeding.np_random(seed)
 
         # 重置field - Field类会自动处理清空和初始化
         self.field = Field(self.field.field_size)
         
+        # 重置玩家列表
+        self.players = []
+        
+        # 重置食物相关变量
+        self._food_spawned = 0.0
+        
         self._spawn_agents()
-        self._update_field()
         self._spawn_food()
         
-        self.current_step = 0
         self._game_over = False
         self._gen_valid_actions()
 
+        # 重置玩家奖励
+        self.reset_player_rewards()
+
         observations = self._make_observations()
         self.reward_events = []
+        if not hasattr(self, 'current_episode'):
+            self.current_episode = 0
+        else:
+            self.current_episode += 1
+        if self.current_episode == 0:
+            import os
+            os.makedirs('logs', exist_ok=True)
+            with open('logs/attraction_step_reward.csv', 'w') as f:
+                f.write('episode,step,attraction_reward,agent_pos,food_pos\n')
+        
+        # 重置统计变量
+        self.valid_action_count = 0
+        self.invalid_action_count = 0
         return observations, {}
 
     def _spawn_agents(self):
-        """生成智能体"""
+        """生成玩家"""
         for i in range(self.num_agents):
+            # 创建Player对象
+            player_level = (
+                self._np_random.integers(self.min_player_level[i], self.max_player_level[i] + 1) 
+                if i == 0 else 1
+            )
+            player = Player(
+                player_id=i,
+                level=player_level,
+                is_self=(i == 0)  # 第一个玩家为主玩家
+            )
+            self.players.append(player)
+            
+            # 为玩家找位置
             attempts = 0
             while attempts < 1000:
-                row = self.np_random.integers(0, self.field.rows)
-                col = self.np_random.integers(0, self.field.cols)
+                row = self._np_random.integers(0, self.field.rows)
+                col = self._np_random.integers(0, self.field.cols)
                 if self.field.is_empty(row, col):
-                    agent_level = (
-                        self.np_random.integers(self.min_player_level[i], self.max_player_level[i] + 1) 
-                        if i == 0 else 1
-                    )
-                    if self.field.place_agent(i, row, col, agent_level):
+                    if self.field.place_player(player, row, col):
                         break
                 attempts += 1
 
     def _spawn_food(self):
-        """生成食物"""
+        """生成食物（基于food_positions，带详细调试）"""
         food_count = 0
         attempts = 0
         min_levels = self.max_food_level if self.force_coop else self.min_food_level
         max_levels = self.max_food_level if self.max_food_level is not None else np.array([sum(sorted(self.agent_levels)[:2])] * self.max_num_food)
-
         while food_count < self.max_num_food and attempts < 1000:
             attempts += 1
-            row = self.np_random.integers(1, self.field.rows - 1)
-            col = self.np_random.integers(1, self.field.cols - 1)
-
-            if self.field.is_empty(row, col):
+            row = self._np_random.integers(0, self.field.rows)
+            col = self._np_random.integers(0, self.field.cols)
+            can_place = self.field.is_empty(row, col)
+            if can_place:
                 food_level = (
                     min_levels[food_count] if min_levels[food_count] == max_levels[food_count]
-                    else self.np_random.integers(min_levels[food_count], max_levels[food_count] + 1)
+                    else self._np_random.integers(min_levels[food_count], max_levels[food_count] + 1)
                 )
-                if self.field.place_food(row, col, food_level):
+                placed = self.field.place_food(row, col, food_level)
+                if placed:
                     food_count += 1
-                
-        # 计算总食物量
         self._food_spawned = self.field.get_total_food_level()
 
-    #==============================
-    # 食物加载处理
-    #==============================
-
     def _process_loading(self, loading_agents):
-        """处理食物加载"""
+        """处理食物加载（基于food_positions）"""
         agents_to_process = set(loading_agents)
         loaded_foods = []
-        
         while agents_to_process:
             agent_idx = agents_to_process.pop()
             agent_pos = self.get_agent_position_from_field(agent_idx)
             if agent_pos is None:
                 continue
-            
-            # 查找相邻食物
             food_pos = self._get_adjacent_food(agent_pos)
             if food_pos is None:
                 continue
-                
-            food_level = self.field.get_field_point(*food_pos).get_level()
-            
-            # 查找协作智能体
+            food_level = self.field.food_positions.get(food_pos, 0)
+            if food_level == 0:
+                continue
             adj_agents = [a for a in self._get_adjacent_agents(food_pos) if a in agents_to_process]
-            total_level = sum(self.field.get_agent_level(a) for a in adj_agents) + self.field.get_agent_level(agent_idx)
-            
+            total_level = sum(self.field.get_player_level(a) for a in adj_agents) + self.field.get_player_level(agent_idx)
             agents_to_process -= set(adj_agents)
             success = total_level >= food_level
-            
-            # 记录结果
             for a in adj_agents + [agent_idx]:
                 loaded_foods.append({'success': success, 'agent': a, 'food_level': food_level})
-            
             if success:
                 self.field.remove_food(*food_pos)
-         
         return loaded_foods
 
     def _get_adjacent_food(self, pos):
-        """获取相邻食物位置"""
+        """获取相邻食物位置（基于food_positions）"""
         row, col = pos
-        adjacent_positions = self.field.get_adjacent_positions(row, col)
+        adjacent_positions = [(row-1, col), (row+1, col), (row, col-1), (row, col+1)]
         for adj_row, adj_col in adjacent_positions:
-            if self.field.is_food_at(adj_row, adj_col):
+            if (adj_row, adj_col) in self.field.food_positions:
                 return (adj_row, adj_col)
         return None
 
     def _get_adjacent_agents(self, pos):
-        """获取相邻智能体"""
+        """获取相邻玩家（基于player_positions）"""
         row, col = pos
         adjacent = []
-        adjacent_positions = self.field.get_adjacent_positions(row, col)
+        adjacent_positions = [(row-1, col), (row+1, col), (row, col-1), (row, col+1)]
         for adj_row, adj_col in adjacent_positions:
-            agent_id = self.field.get_agent_id(adj_row, adj_col)
-            if agent_id >= 0:
-                adjacent.append(agent_id)
+            for player_id, player_pos in self.field.player_positions.items():
+                if player_pos == (adj_row, adj_col):
+                    adjacent.append(player_id)
+                    break
         return adjacent
 
     #==============================
@@ -487,46 +591,55 @@ class ForagingEnv(gym.Env):
     #==============================
     
     def __step(self, ego_action, teammate_actions):
-        """执行环境中的一个时间步骤"""
+        self.current_step += 1
+        # ====== 处理 agent 动作 ======
+        all_actions = [ego_action] + teammate_actions
+        loading_agents = []
+        
+        # 处理每个 agent 的动作
+        for agent_idx, action in enumerate(all_actions):
+            if action == Action.LOAD.value:
+                loading_agents.append(agent_idx)
+            else:
+                # 处理移动动作
+                self._process_agent_movement(agent_idx, action)
+        
+        # 处理加载动作
+        if loading_agents:
+            self._process_loading(loading_agents)
+        # ====== END ======
+        
         # 记录位置历史
         self.agent_positions_history.append(list(self.agent_positions))
         food_positions = [(i, j) for i, j, level in self.field.get_all_food_infos()]
         self.food_positions_history.append(food_positions)
-       
-        # 处理移动和加载
-        loading_agents = set()
-        
-        # 转换ego动作为Action枚举
-        try:
-            ego_action_enum = Action(ego_action)
-        except ValueError:
-            ego_action_enum = Action.NONE
-        
-        # 处理主智能体动作
-        if self._process_agent_movement(0, ego_action_enum):
-            loading_agents.add(0)
-        
-        # 处理队友智能体动作
-        for teammate_idx, teammate_action in enumerate(teammate_actions):
-            agent_idx = teammate_idx + 1
-            
-            try:
-                teammate_action_enum = Action(teammate_action)
-            except ValueError:
-                teammate_action_enum = Action.NONE
-                
-            if self._process_agent_movement(agent_idx, teammate_action_enum):
-                loading_agents.add(agent_idx)
-                
-        # 更新field以反映新的智能体位置
-        self._update_field()
-                
-        # 处理食物加载行为
-        loaded_foods = self._process_loading(loading_agents)
-        self.reward_events.extend(loaded_foods)
-            
-        # 更新环境状态
-        self.current_step += 1
+        # ====== 每步吸引力奖励计算与归一化 ======
+        if not hasattr(self, 'step_attraction_rewards'):
+            self.step_attraction_rewards = []
+        if self.current_step > 1 and len(self.agent_positions_history) >= 2 and len(self.food_positions_history) >= 2:
+            prev_agent_pos = self.agent_positions_history[-2][0]
+            curr_agent_pos = self.agent_positions_history[-1][0]
+            prev_foods = self.food_positions_history[-2]
+            curr_foods = self.food_positions_history[-1]
+            if len(prev_foods) > 0 and len(curr_foods) == len(prev_foods):
+                prev_min_dist = min(abs(prev_agent_pos[0] - f[0]) + abs(prev_agent_pos[1] - f[1]) for f in prev_foods)
+                curr_min_dist = min(abs(curr_agent_pos[0] - f[0]) + abs(curr_agent_pos[1] - f[1]) for f in curr_foods)
+                dist_change = prev_min_dist - curr_min_dist
+                norm_reward = 2 / (1 + np.exp(-dist_change)) - 1
+                norm_reward *= self.attraction_reward_factor
+                self.step_attraction_rewards.append(norm_reward)
+                # 记录到csv
+                import os
+                os.makedirs('logs', exist_ok=True)
+                with open('logs/attraction_step_reward.csv', 'a') as f:
+                    f.write(f"{getattr(self, 'current_episode', 0)},{self.current_step},{norm_reward},{curr_agent_pos},{curr_foods}\n")
+            else:
+                self.step_attraction_rewards.append(0.0)
+                norm_reward = 0.0
+        else:
+            self.step_attraction_rewards.append(0.0)
+            norm_reward = 0.0
+        # ====== END ======
         
         # 检查游戏是否结束
         food_sum = self.field.get_total_food_level()
@@ -537,10 +650,19 @@ class ForagingEnv(gym.Env):
         
         # 计算终局奖励
         if self._game_over:
-            reward = self._calculate_final_reward()
+            reward_detail = self._calculate_final_reward()
+            final_reward = reward_detail['total']
+            self._last_reward_detail = reward_detail  # 保存详细reward组成
+            self.distribute_rewards(final_reward)
         else:
-            reward = 0.0
-            
+            final_reward = 0.0
+            self._last_reward_detail = {'total': 0.0, 'base': 0.0, 'attraction': 0.0, 'step': 0.0}
+        
+        # 修改：每步reward都包含吸引力奖励，终局时再加终局奖励
+        reward = norm_reward
+        if self._game_over:
+            reward += final_reward
+        
         # 准备返回值
         done = self._game_over
         truncated = False
@@ -568,13 +690,18 @@ class ForagingEnv(gym.Env):
         trajectories = []
         final_reward = 0
 
-        # 初始化智能体设置
-        ego = agents[0] if len(agents) > 0 else None
-        teammates = agents[1:] if len(agents) > 1 else []
+        # 将智能体关联到玩家对象
+        for i, agent in enumerate(agents):
+            if i < len(self.players):
+                self.players[i].agent = agent
+
+        # 初始化玩家设置
+        ego_player = self.players[0] if len(self.players) > 0 else None
+        teammate_players = self.players[1:] if len(self.players) > 1 else []
         
         # 初始化动作缓冲区
         ego_actions_buff = deque(maxlen=50)
-        teammate_actions_buffs = [deque(maxlen=50) for _ in range(len(teammates))]
+        teammate_actions_buffs = [deque(maxlen=50) for _ in range(len(teammate_players))]
 
         # 渲染初始状态
         if render:
@@ -583,11 +710,11 @@ class ForagingEnv(gym.Env):
         
         # 逐步执行，直到回合结束
         while not done:
-            # 获取ego智能体的动作
-            ego_action = self._get_ego_action(ego, obss, ego_actions_buff, is_training)
+            # 获取ego玩家的动作
+            ego_action = self._get_ego_action(ego_player, obss, ego_actions_buff, is_training)
             
-            # 获取teammate智能体的动作列表
-            teammate_actions = self._get_teammate_actions(teammates, obss, teammate_actions_buffs, is_training)
+            # 获取teammate玩家的动作列表
+            teammate_actions = self._get_teammate_actions(teammate_players, obss, teammate_actions_buffs, is_training)
             
             # 执行动作并获取结果
             next_obss, reward, done, _, _ = self.__step(ego_action, teammate_actions)
@@ -596,8 +723,10 @@ class ForagingEnv(gym.Env):
             if is_training:
                 trajectories.append([obss[0], ego_action, next_obss[0], done])
             
-            # 记录终局奖励
-            final_reward = reward if done else 0
+            # 记录终局奖励和详细组成
+            if done:
+                final_reward = reward
+                final_reward_detail = self._last_reward_detail.copy() if hasattr(self, '_last_reward_detail') else None
             
             # 更新观察
             obss = next_obss
@@ -607,28 +736,35 @@ class ForagingEnv(gym.Env):
                 time.sleep(sleep_time)
 
         # 添加轨迹到经验缓冲区
-        if is_training and ego and hasattr(ego, 'add_traj2buffer'):
-            for ts in trajectories:
-                ego.add_traj2buffer([
+        if is_training and ego_player and ego_player.agent and hasattr(ego_player.agent, 'add_traj2buffer'):
+            step_attraction_rewards = self.step_attraction_rewards if hasattr(self, 'step_attraction_rewards') else []
+            for idx, ts in enumerate(trajectories):
+                # 每步奖励只包含该步吸引力奖励，只有最后一步加终局奖励
+                step_reward = 0.0
+                if idx < len(step_attraction_rewards):
+                    step_reward += step_attraction_rewards[idx]
+                if idx == len(trajectories) - 1:
+                    step_reward += final_reward
+                ego_player.agent.add_traj2buffer([
                     ts[0],
                     ts[1],
-                    final_reward,
+                    step_reward,
                     ts[2],
                     ts[3]
                 ])
+            self.step_attraction_rewards = []  # 清空
         
-        return trajectories, final_reward, self.current_step
+        return trajectories, final_reward, self.current_step, final_reward_detail
 
-    def _get_ego_action(self, ego, obss, ego_actions_buff, is_training):
-        """获取ego智能体的动作"""
-        if not ego:
+    def _get_ego_action(self, ego_player, obss, ego_actions_buff, is_training):
+        if not ego_player:
             return self._validate_single_action(0, Action.NONE.value)
             
         # 获取ego的有效动作
         valid_actions = [action.value for action in self._valid_actions[0]]
         
-        # ego智能体选择动作
-        action = ego.select_action({'obs': obss[0], 'actions': valid_actions}, is_training)
+        # 使用Player对象的select_action接口
+        action = ego_player.select_action({'obs': obss[0], 'actions': valid_actions}, is_training)
         
         # 检测重复动作
         if self._repeated_actions_detected(action, ego_actions_buff):
@@ -639,23 +775,19 @@ class ForagingEnv(gym.Env):
         ego_actions_buff.append(action)
         
         # 验证ego动作
-        return self._validate_single_action(0, action)
+        validated_action = self._validate_single_action(0, action)
+        return validated_action
 
-    def _get_teammate_actions(self, teammates, obss, teammate_actions_buffs, is_training):
-        """获取所有teammate智能体的动作"""
+    def _get_teammate_actions(self, teammate_players, obss, teammate_actions_buffs, is_training):
         teammate_actions = []
-        
         for i in range(1, self.num_agents):
             teammate_idx = i - 1
-            
-            if teammate_idx < len(teammates):
-                teammate = teammates[teammate_idx]
-                
-                # 获取teammate的有效动作
+            if teammate_idx < len(teammate_players):
+                teammate_player = teammate_players[teammate_idx]
                 valid_actions = [action.value for action in self._valid_actions[i]]
-                
-                # teammate智能体选择动作
-                action = teammate.select_action({'obs': obss[i], 'actions': valid_actions}, is_training)
+                obs_input = obss[i]
+                # 只传obs和actions，避免is_training传错位置
+                action = teammate_player.select_action({'obs': obs_input, 'actions': valid_actions})
                 
                 # 检测重复动作
                 if self._repeated_actions_detected(action, teammate_actions_buffs[teammate_idx]):
@@ -668,7 +800,7 @@ class ForagingEnv(gym.Env):
                 # 验证teammate动作
                 teammate_action = self._validate_single_action(i, action)
             else:
-                # 没有对应的teammate智能体，使用默认动作
+                # 没有对应的teammate玩家，使用默认动作
                 teammate_action = self._validate_single_action(i, Action.NONE.value)
             
             teammate_actions.append(teammate_action)
@@ -687,27 +819,20 @@ class ForagingEnv(gym.Env):
             return Action.NONE.value
 
     def _repeated_actions_detected(self, action, actions_buff):
-        """检测动作是否出现重复"""
-        if not actions_buff:
+        """增强循环检测灵活性"""
+        buff = list(actions_buff)
+        if not buff or action == 5:  # LOAD动作不检测重复
             return False
-        
-        if len(actions_buff) >= 3 and action != 5:
-            # 超过3次连续相同动作视为重复
-            if action == actions_buff[-1] == actions_buff[-2] == actions_buff[-3]:
-                return True
-                
-            if len(actions_buff) >= 4:
-                # 检测2步循环
-                if action == actions_buff[-2] and actions_buff[-1] == actions_buff[-3]:
+        buff_len = len(buff)
+        # 检测连续相同动作（至少4次）
+        if buff_len >= 3 and all(action == buff[-i-1] for i in range(3)):
+            return True
+        # 检测2~5步循环模式
+        for cycle in range(2, 6):
+            if buff_len >= cycle * 2:
+                pattern = buff[-cycle:]
+                if all(buff[-cycle*(j+1):-cycle*j] == pattern for j in range(1, 2)):
                     return True
-                
-                # 检测3步循环
-                if len(actions_buff) >= 6:
-                    if (action == actions_buff[-3] and 
-                        actions_buff[-1] == actions_buff[-4] and 
-                        actions_buff[-2] == actions_buff[-5]):
-                        return True
-                    
         return False
 
     #==============================
@@ -715,60 +840,36 @@ class ForagingEnv(gym.Env):
     #==============================
     
     def _calculate_final_reward(self):
-        """计算终局奖励"""
+        """计算终局奖励，返回详细组成"""
         reward = 0.0
-        
+        base_reward = 0.0
+        step_reward = 0.0
+
         # 基础奖励
         food_sum = self.field.get_total_food_level()
         if food_sum == 0:
-            reward = 1.0
+            base_reward = 1.0
         else:
             success_rate = (self._food_spawned - food_sum) / self._food_spawned if self._food_spawned > 0 else 0
-            reward = success_rate * 0.5 if success_rate > 0 else -1.0
-            
-        # 吸引力奖励
-        if self.agent_positions_history and self.food_positions_history:
-            attraction_reward = self._calculate_attraction_reward()
-            reward += attraction_reward
-        
+            base_reward = success_rate * 0.5 if success_rate > 0 else -1.0
+            # 限制基础奖励的最大值为1.0
+            base_reward = min(base_reward, 1.0)
+        reward += base_reward
+
         # 步数奖励
         if reward > 0:
             step_efficiency = np.exp(-self.decay_rate * self.current_step)
-            reward += reward * self.step_reward_factor * step_efficiency
-            
-        return reward
+            step_reward = reward * self.step_reward_factor * step_efficiency
+            reward += step_reward
 
-    def _calculate_attraction_reward(self):
-        """计算吸引力奖励"""
-        total_distance_change = 0
-        valid_steps = 0
-        
-        for i in range(1, len(self.agent_positions_history)):
-            current_foods = self.food_positions_history[i]
-            prev_foods = self.food_positions_history[i-1]
-            
-            if len(current_foods) == 0 or len(current_foods) != len(prev_foods):
-                continue
-                
-            agent_pos = self.agent_positions_history[i][0]
-            prev_agent_pos = self.agent_positions_history[i-1][0]
-            
-            if len(current_foods) > 0:
-                current_min_dist = min(abs(agent_pos[0] - f[0]) + abs(agent_pos[1] - f[1]) for f in current_foods)
-                prev_min_dist = min(abs(prev_agent_pos[0] - f[0]) + abs(prev_agent_pos[1] - f[1]) for f in prev_foods)
-                total_distance_change += prev_min_dist - current_min_dist
-                valid_steps += 1
-        
-        if valid_steps == 0:
-            return 0.0
-            
-        avg_distance_change = total_distance_change / valid_steps
-        attraction_reward = 2 / (1 + np.exp(-avg_distance_change)) - 1
-        
-        self.agent_positions_history.clear()
-        self.food_positions_history.clear()
-        
-        return attraction_reward * self.attraction_reward_factor
+        return {
+            'total': reward,
+            'base': base_reward,
+            'attraction': 0.0,  # 保留字段但设为0，保持兼容性
+            'step': step_reward
+        }
+
+
 
     #==============================
     # 渲染方法
@@ -778,17 +879,27 @@ class ForagingEnv(gym.Env):
         """渲染环境"""
         if not self._rendering_initialized:
             from .rendering import Viewer
-            self.viewer = Viewer(self.field.shape)
+            self.viewer = Viewer(self.field.field_size)
             self._rendering_initialized = True
+            
+        # 获取field的二维数组表示
+        field_array = self._get_field_int_representation()
         
-        # 创建兼容的渲染数据
-        render_env = type('RenderEnv', (), {
-            'field': self._get_field_int_representation(),
-            'agent_positions': self.agent_positions,
-            'agent_levels': self.agent_levels
-        })()
+        # 获取智能体位置和等级
+        agent_positions = self.agent_positions
+        agent_levels = self.agent_levels
         
-        return self.viewer.render(render_env, return_rgb_array=self.render_mode == "rgb_array")
+        # 获取食物位置和等级
+        food_positions = self.field.food_positions
+        
+        # 使用新的渲染方法，传递智能体和食物的位置信息
+        return self.viewer.render(
+            field_array, 
+            agent_positions=agent_positions,
+            agent_levels=agent_levels,
+            food_positions=food_positions,
+            return_rgb_array=self.render_mode == "rgb_array"
+        )
 
     def close(self):
         """关闭环境"""

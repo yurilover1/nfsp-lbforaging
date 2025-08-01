@@ -1,24 +1,27 @@
-import numpy as np
-import os
-import matplotlib.pyplot as plt
 import logging
-from agents.partner_agent import SimpleAgent2
+import os
 import random
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+from agents.partner_agent import SimpleAgent2
 
 # 添加从nfsp_run.py移动的函数
 logger = logging.getLogger(__name__)
 
 
-def teammate_generate(action_size, device, id=random.randint(0, 7)):
+def teammate_generate(action_size, device, id=None):
+    if id is None:
+        id = random.randint(0, 7)
+    model_path = f'./partners/agents_for_5x5/agent_{id}_1.pt'
     teammate_agent = SimpleAgent2(
         input_dim=12,  # 使用正确的输入维度12而不是state_size
         hidden_dims=[128, 128],
         output_dim=action_size,
         device=device
     )
-    model_path = f'./partners/agents_for_5x5/agent_{id}_1.pt'
     teammate_agent.load_model(model_path)
-
     return teammate_agent
 
 def calculate_state_size(env):
@@ -28,10 +31,7 @@ def calculate_state_size(env):
         obs, _ = env.reset()
         
         # 如果观测是元组（多智能体环境），取第一个智能体的观测
-        if isinstance(obs, tuple):
-            first_obs = obs[0]
-        else:
-            first_obs = obs
+        first_obs = _extract_obs(obs)
             
         # 检查观测形状以判断观测模式
         if isinstance(first_obs, np.ndarray):
@@ -168,4 +168,12 @@ def save_history(history, nfsp_agents, layer_num=7):
         print(f"保存训练历史时出错: {e}")
         import traceback
         traceback.print_exc()
+
+
+# 在文件顶部添加通用_extract_obs函数
+
+def _extract_obs(obs):
+    if isinstance(obs, tuple):
+        return obs[0]
+    return obs
 

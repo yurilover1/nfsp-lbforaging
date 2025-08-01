@@ -1,474 +1,393 @@
+import os
+import random
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import math
-import random
-from matplotlib import rcParams
-import os
+
 from .agent import BaseAgent
-from .model import dueling_ddqn, policy
-from .buffer import reservoir_buffer, n_step_replay_buffer, replay_buffer
-from .utils import action_mask, action_mask_with_load_boost
+from .model import policy
+from .ppo_agent import PPOAgent
+
+
+class ReservoirBuffer:
+    def __init__(self, buffer_size):
+        self.buffer = []
+        self.buffer_size = buffer_size
+        self.total_seen = 0
+
+    def add(self, sample):
+        self.total_seen += 1
+        if len(self.buffer) < self.buffer_size:
+            self.buffer.append(sample)
+        else:
+            idx = random.randint(0, self.total_seen - 1)
+            if idx < self.buffer_size:
+                self.buffer[idx] = sample
+
+    def sample(self, batch_size):
+        if len(self.buffer) < batch_size:
+            raise ValueError(f"Reservoir buffer中样本不足，当前{len(self.buffer)}，需要{batch_size}")
+        return random.sample(self.buffer, batch_size)
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 class NFSPAgent(BaseAgent):
-    def __init__(self, 
-                player,
-                state_size,
-                action_size, 
-                epsilon_init=0.06,
-                epsilon_decay=10000,
-                epsilon_min=0.0,
-                update_freq=100,
-                sl_lr=0.005,
-                rl_lr=0.001,
-                sl_buffer_size=10000,
-                rl_buffer_size=10000,
-                n_step=1,
-                gamma=0.99,
-                eta=0.1,
-                tau=0.005,  # 添加tau参数，用于目标网络软更新
-                rl_start=300,
-                sl_start=300,
-                train_freq=1,
-                rl_batch_size=64,
-                sl_batch_size=64,
-                device=None,
-                hidden_units=64,
-                layers=3,
-                eval_mode='average'):
-        
+    def __init__(self, player, state_size, action_size, device, hidden_units, layers, gamma, eta, rl_lr, sl_lr, sl_buffer_size, eval_mode, entropy_coef, batch_size):
         super().__init__(player)
-        self.name = f"NFSP Agent {player.level if hasattr(player, 'level') else ''}"
-        
-        # 基本参数
+        self.name = f"NFSP-PPO Agent {player.level if hasattr(player, 'level') else ''}"
         self.state_size = state_size
         self.action_size = action_size
-        self.n_step = n_step
-        self.gamma = gamma
-        self.eta = eta  # 决定使用哪种策略的概率
-        self.tau = tau  # 目标网络软更新系数
-        self.rl_batch_size = rl_batch_size
-        self.sl_batch_size = sl_batch_size
-        self.update_freq = update_freq
-        self.train_freq = train_freq
-        self.rl_start = rl_start
-        self.sl_start = sl_start
-        self.eval_mode = eval_mode
-        # 保存学习率参数
-        self.rl_lr = rl_lr
-        self.sl_lr = sl_lr
-        # 设备设置
-        self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        # 初始化网络
+        self.device = device
         self.hidden_units = hidden_units
-        self.networks_initialized = False
         self.layers = layers
-        # 记录是否已经进行了状态尺寸检查 - 优化性能，避免重复检查
-        self.state_size_checked = False
-        # 初始化经验回放缓冲区
-        if self.n_step > 1:
-            self.rl_buffer = n_step_replay_buffer(rl_buffer_size, self.n_step, self.gamma)
-        else:
-            self.rl_buffer = replay_buffer(rl_buffer_size)
-        self.sl_buffer = reservoir_buffer(sl_buffer_size)
-        # epsilon策略
-        self.epsilon_init = epsilon_init
-        self.epsilon_decay = epsilon_decay
-        self.epsilon_min = epsilon_min
-        self.epsilon = lambda x: self.epsilon_min + (self.epsilon_init - self.epsilon_min) * math.exp(-1. * x / self.epsilon_decay)
-        
-        # 训练计数
-        self.count = 0
-        
-        # 策略模式 (平均策略 或 最优策略)
-        self.policy_mode = None
-        self.choose_policy_mode()
-        self.eval_flag = False
-        
-        # 损失记录
-        self.losses = []  # SL损失
-        self.RLlosses = []  # RL损失
-        self.policy_accuracies = []  # 策略准确度记录
-        
-        # 避免使用原始类中的use_raw属性
-        self.use_raw = False
-    
-    def _init_networks(self, obs_sample):
-        """
-        初始化NFSP所需的所有神经网络
-        为RL和SL策略设置不同的网络架构
-        """
-        # 预处理观察样本获取状态表示
-        state = self._preprocess_state(obs_sample)
-        if hasattr(state, 'shape') and len(state.shape) > 0:
-            self.state_size = state.shape[0]
-        else:
-            # 直接预处理整个观察
-            state = self._preprocess_state(obs_sample)
-            self.state_size = len(state) if hasattr(state, '__len__') else 100
-
-        # 固定动作大小为环境中的动作数
-        self.action_size = 6
-
-        self.rl_eval_network = dueling_ddqn(self.state_size, self.action_size, 
-                                hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
-        
-        self.rl_target_network = dueling_ddqn(self.state_size, self.action_size, 
-                                hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
-        
-        self.rl_target_network.load_state_dict(self.rl_eval_network.state_dict())
-        
-        # 为RL网络设置优化器
-        self.rl_optimizer = torch.optim.Adam(self.rl_eval_network.parameters(), lr=self.rl_lr)
-        
-        # 初始化监督学习策略网络
+        self.gamma = gamma
+        self.eta = eta
+        self.eval_mode = eval_mode
+        # 初始化PPO智能体
+        hidden_dims = [256] * 6
+        self.rl_agent = PPOAgent(
+            input_dim=self.state_size,
+            hidden_dims=hidden_dims,
+            output_dim=self.action_size,
+            device=self.device,
+            player=self.player,
+            gamma=self.gamma,
+            actor_lr=rl_lr,  # 使用传入的rl_lr
+            critic_lr=rl_lr,  # 使用相同的学习率
+            entropy_coef=entropy_coef,  # 使用传入的entropy_coef
+            batch_size=batch_size
+        )
+        # 初始化监督学习网络（兼容性保留）
         self.sl_policy = policy(self.state_size, self.action_size,
-                                    hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
-        
-        # 为SL网络设置优化器
-        self.sl_optimizer = torch.optim.Adam(self.sl_policy.parameters(), lr=self.sl_lr)
-        
-        # 初始化平均策略和最佳响应
-        self.avg_policy = AveragePolicy(self)
+                               hidden_units=self.hidden_units, num_layers=self.layers).to(self.device)
+        self.sl_optimizer = torch.optim.Adam(self.sl_policy.parameters(), lr=sl_lr)
+        self.sl_memory = ReservoirBuffer(sl_buffer_size)
+        self.losses = []
+        self.RLlosses = []
+        self.policy_accuracies = []
+        self.policy_mode = None
+        self.eval_flag = False
+        # 添加全局经验计数器，用于正确的reservoir采样
+        self.global_step = 0
 
-        self.networks_initialized = True
-       
-    def _ensure_network_compatibility(self, state):
-        """确保网络与输入状态大小兼容"""
-        # 如果网络尚未初始化，初始化它
-        if not self.networks_initialized:
-            self._init_networks({'obs': state})
-            self.state_size_checked = True  # 标记已检查状态尺寸
-            return True
-            
-        # 如果已经检查过状态尺寸兼容性，不再重复检查
-        if self.state_size_checked:
-            return False
-            
-        # 首次检查状态大小是否与当前网络匹配
-        state_size = state.shape[0]
-        if state_size != self.state_size:
-            print(f"检测到状态大小变化: 当前={state_size}, 网络期望={self.state_size}")
-            print("重新构建网络以匹配新的状态大小...")
-            
-            # 存储旧网络的训练信息
-            old_losses = self.losses.copy() if hasattr(self, 'losses') else []
-            old_rl_losses = self.RLlosses.copy() if hasattr(self, 'RLlosses') else []
-            old_accuracies = self.policy_accuracies.copy() if hasattr(self, 'policy_accuracies') else []
-            
-            # 更新状态大小
-            self.state_size = state_size
-            
-            # 重新初始化网络
-            self.networks_initialized = False
-            self._init_networks({'obs': state})
-            
-            # 恢复旧的训练指标
-            self.losses = old_losses
-            self.RLlosses = old_rl_losses
-            self.policy_accuracies = old_accuracies
-            
-            self.state_size_checked = True  # 标记已检查状态尺寸
-            return True
-        
-        self.state_size_checked = True  # 标记已检查状态尺寸
-        return False
-    
-    def choose_policy_mode(self):
-        """选择策略模式，以eta概率使用平均策略，否则使用最优策略"""
-        self.policy_mode = 'average' if random.random() < self.eta else 'best'
-    
     def _preprocess_state(self, obs):
-        """
-        预处理观察到的状态
-        处理三种类型的观察:
-        1. 网格观察模式 - 包含4个通道的数组:
-           - 通道0: 智能体层，显示所有智能体的位置和等级
-           - 通道1: 食物层，显示所有食物的位置和等级
-           - 通道2: 可访问层，显示哪些位置可访问
-           - 通道3: 自身标识层，标识自己的位置
-        2. 标准观察模式 - 包含field和players信息的结构化数据
-        """
-        # 如果已经是numpy数组，可能是预处理过的状态
-        if isinstance(obs, np.ndarray):
-            # 检查是否是标准网格观测格式
-            if len(obs.shape) == 3:
-                # 展平多维数组
-                return obs.reshape(-1).astype(np.float32)
-            # 确保是一维数组
-            elif len(obs.shape) == 1:
-                return obs.astype(np.float32)
+        """修复状态预处理逻辑，统一处理各种输入格式"""
+        # 处理tuple格式 (obs_array, mask)
+        if isinstance(obs, tuple) and len(obs) == 2:
+            obs = obs[0]  # 只取obs_array部分
         
-        # 如果是字典格式，提取'obs'键
+        # 处理字典格式
         if isinstance(obs, dict) and 'obs' in obs:
             raw_obs = obs['obs']
-            # 递归处理提取的观察
             return self._preprocess_state(raw_obs)
         
-    def rl_train(self, train_num):
-        """训练Q网络 (RL)"""
-        # 确保网络已初始化且缓冲抵达训练要求
-        if not self.networks_initialized or len(self.rl_buffer) <= self.rl_start:
-            return
+        # 处理numpy数组
+        if isinstance(obs, np.ndarray):
+            if len(obs.shape) == 3:
+                return obs.reshape(-1).astype(np.float32)
+            elif len(obs.shape) == 1:
+                return obs.astype(np.float32)
+            else:
+                return obs.astype(np.float32)
         
-        self.count += train_num
+        # 处理其他格式
+        return np.array(obs, dtype=np.float32)
 
-        for _ in range(train_num):    
-            observation, action, reward, next_observation, done = self.rl_buffer.sample(self.rl_batch_size)
+    def _extract_obs(self, obs):
+        # 如果是tuple，取第一个元素
+        if isinstance(obs, tuple):
+            return obs[0]
+        return obs
 
-            # 使用模型中的train方法进行训练
-            self.rl_eval_network.train(
-                observation=observation,
-                action=action,
-                reward=reward,
-                next_observation=next_observation,
-                done=done,
-                target_network=self.rl_target_network,
-                optimizer=self.rl_optimizer,
-                gamma=self.gamma,
-                count=self.count,
-                update_freq=self.update_freq,
-                tau=self.tau,  # 传递tau参数
-                losses=self.RLlosses,
-                clip_grad_norm=1.0
-            )
-
-        self.rl_eval_network.soft_update(self.rl_target_network, self.tau)
-        # 根据网络层数调整清空频率：层数越多，保留数据时间越长
-        clear_interval = 2#bvcxlmax(10, self.layers * 3)  # 基础间隔10，每增加一层增加3个间隔
-        if self.count % clear_interval == 0:
-            self.rl_buffer.clear()
-    
-    def sl_train(self, train_num):
-        """训练策略网络 (SL)"""
-        # 确保网络已初始化
-        if not hasattr(self, 'networks_initialized') or not \
-            self.networks_initialized or len(self.sl_buffer) < self.sl_start:
-            return
-        
-        for _ in range(train_num):
+    def select_action(self, obs, is_training=False):
+        if random.random() < self.eta:
+            self.policy_mode = 'best'
+            action = self.step(obs, deterministic=False)
+            self.sl_memory.add((self._preprocess_state(obs), action))
+        else:
+            self.policy_mode = 'average'
+            action = self.step(obs, deterministic=False)
+        return action
+    def step(self, obs, deterministic=False):
+        obs = self._extract_obs(obs)
+        """修复状态预处理，确保传入正确的格式"""
+        # 处理环境返回的原始obs格式
+        if isinstance(obs, dict) and 'obs' in obs:
+            state = self._preprocess_state(obs)
+            # 获取有效动作列表
+            valid_actions = obs.get('actions', list(range(self.action_size)))
+        else:
+            state = self._preprocess_state(obs)
+            valid_actions = list(range(self.action_size))
             
-            observation, action = self.sl_buffer.sample(self.sl_batch_size)
-            
-            self.losses.append(self.sl_policy.train(
-                observation, action, self.policy_accuracies, self.sl_optimizer))
-    
-    def step(self, obs):
-        """根据观察选择动作，支持字典格式的observation"""
-        # 预处理状态
-        state = self._preprocess_state(obs)
-        
-        # 确保网络已初始化并与状态大小兼容（只在第一次调用时进行完整检查）
-        if not self.networks_initialized or not self.state_size_checked:
-            self._ensure_network_compatibility(state)
-        
-        legal_actions = obs['actions']
-            
-        # 确保legal_actions非空
-        if not legal_actions:
-            print(f"警告: 智能体{self.player.level if hasattr(self.player, 'level') else '?'}收到空的legal_actions列表，使用所有动作")
-            legal_actions = list(range(self.action_size))
-            
-        # 将状态转换为张量
         state_tensor = torch.FloatTensor(np.expand_dims(state, 0)).to(self.device)
         
-        # 根据策略模式选择动作概率
-        r_flag = False
+        # 策略选择
         if self.policy_mode == 'best':
-            probs, r_flag = self.rl_eval_network.act(state_tensor, self.epsilon(self.count))
+            probs, _ = self.rl_agent.act(state_tensor, 0)
         else:
             probs = self.sl_policy.act(state_tensor)
         
-        # 过滤不合法的动作
-        valid_probs = action_mask(probs, legal_actions)
+        # 只保留有效动作的概率，并重新归一化
+        valid_probs = np.zeros(self.action_size)
+        for action in valid_actions:
+            if 0 <= action < len(probs):
+                valid_probs[action] = probs[action]
         
-        return np.argmax(valid_probs) if r_flag else np.random.choice(
-            len(valid_probs), p=valid_probs)
+        # 重新归一化概率
+        prob_sum = np.sum(valid_probs)
+        if prob_sum > 0:
+            valid_probs = valid_probs / prob_sum
+        else:
+            # 如果所有概率都为0，使用均匀分布
+            for action in valid_actions:
+                valid_probs[action] = 1.0 / len(valid_actions)
         
+        # 选择动作
+        if deterministic:
+            action = np.argmax(valid_probs)
+        else:
+            action = np.random.choice(self.action_size, p=valid_probs)
+        
+        # 确保选择的动作在有效动作列表中
+        if action not in valid_actions:
+            # 如果选择的动作无效，从有效动作中随机选择
+            action = np.random.choice(valid_actions)
+        
+        return action
+
+    def rollout_and_train(self, env, teammate_agent=None, min_batch_size=None, max_steps=200, sl_batch_size=64, ppo_update_epochs=4, render=False, by_episode=False):
+        if min_batch_size is None:
+            min_batch_size = self.rl_agent.batch_size
+        
+        # 统计变量
+        batch_rewards = []
+        batch_steps = []
+        batch_actor_losses = []
+        batch_critic_losses = []
+        batch_total_losses = []
+        
+        steps_collected = 0
+        episode_count = 0
+        
+        # 清空PPO buffer
+        self.rl_agent.clear_trajectory()
+        
+        max_episodes = min_batch_size * 2  # 最大回合数限制
+        episode_safety_count = 0
+        
+        # 使用环境的run方法替换游戏执行部分
+        target_episodes = min_batch_size if by_episode else max_episodes
+        
+        while episode_count < target_episodes and episode_safety_count < max_episodes:
+            # 创建智能体列表
+            agents = [self]
+            if teammate_agent is not None:
+                agents.append(teammate_agent)
+            else:
+                # 如果没有传入队友智能体，抛出异常
+                raise ValueError("必须提供teammate_agent参数")
+            
+            # 使用环境的run方法执行回合
+            try:
+                # 运行回合
+                trajectories, episode_reward, current_step, reward_detail = env.run(
+                    agents=agents,
+                    is_training=True,
+                    render=render
+                )
+
+                # 收集统计信息
+                batch_rewards.append(episode_reward)
+                batch_steps.append(current_step)
+                episode_count += 1
+                episode_safety_count += 1
+                
+                # 如果按步数采集，累计步数
+                if not by_episode:
+                    steps_collected += current_step
+                    # 检查是否收集到足够的步数
+                    if steps_collected >= min_batch_size:
+                        break
+                
+            except Exception as e:
+                print(f"[WARNING] 回合执行出错: {e}")
+                episode_safety_count += 1
+                continue
+        # 执行训练
+        if hasattr(self.rl_agent, 'states') and len(self.rl_agent.states) > 0:
+            self.rl_agent.update()
+        else:
+            print("[WARNING] PPO buffer is empty, skip update this batch.")
+        self.sl_train(sl_batch_size)
+        # 获取训练损失
+        if hasattr(self.rl_agent, 'actor_losses') and self.rl_agent.actor_losses:
+            batch_actor_losses = [self.rl_agent.actor_losses[-1]] * episode_count
+        else:
+            batch_actor_losses = [None] * episode_count
+        if hasattr(self.rl_agent, 'critic_losses') and self.rl_agent.critic_losses:
+            batch_critic_losses = [self.rl_agent.critic_losses[-1]] * episode_count
+        else:
+            batch_critic_losses = [None] * episode_count
+        if hasattr(self.rl_agent, 'losses') and self.rl_agent.losses:
+            batch_total_losses = [self.rl_agent.losses[-1]] * episode_count
+        else:
+            batch_total_losses = [None] * episode_count
+        return batch_rewards, batch_steps, batch_actor_losses, batch_critic_losses, batch_total_losses
+
+    def sl_train(self, batch_size=64):
+        """修复SL训练，添加policy_accuracies更新"""
+        if len(self.sl_memory) < batch_size:
+            return
+        
+        batch = self.sl_memory.sample(batch_size)
+        states, actions = zip(*batch)
+        states = torch.FloatTensor(np.stack(states)).to(self.device)
+        actions = torch.LongTensor(actions).to(self.device)
+        
+        logits = self.sl_policy(states)
+        loss = torch.nn.CrossEntropyLoss()(logits, actions)
+        
+        # 修复：计算并更新policy_accuracies
+        with torch.no_grad():
+            probs = torch.softmax(logits, dim=1)
+            pred_actions = torch.argmax(probs, dim=1)
+            accuracy = (pred_actions == actions).float().mean().item()
+            self.policy_accuracies.append(accuracy)
+        print(f"[SL] 当前准确率: {accuracy:.4f}")
+        self.sl_optimizer.zero_grad()
+        loss.backward()
+        # 添加梯度裁剪
+        torch.nn.utils.clip_grad_norm_(self.sl_policy.parameters(), max_norm=1.0)
+        self.sl_optimizer.step()
+        self.losses.append(loss.item())
+        # 打印SL训练信息
+        if len(self.losses) % 20 == 0:  # 每20次训练打印一次
+            print(f"[SL Train] Loss: {loss.item():.4f}, Accuracy: {accuracy:.4f}")
+
     def eval_step(self, obs):
-        """评估时选择动作，支持字典格式的observation"""
-        #将策略模式设为评估模式
         self.policy_mode = self.eval_mode
         self.eval_flag = True
-        return self.step(obs)
-    
-    def add_traj2buffer(self, traj):
-        """
-        将轨迹添加到经验缓冲区
-        轨迹是包含state, action, reward, next_state, done等信息的转换样本列表
-        """
-        state, action, reward, next_state, done = traj
-        # state = self._preprocess_state(state)
-        # next_state = self._preprocess_state(next_state)
-        # 使用标准缓冲区方法添加经验
-        self.rl_buffer.store(state, action, reward, next_state, done)
-        
-        # 记录观察和行动对，用于监督学习缓冲区
-        if self.policy_mode == 'best':
-            self.sl_buffer.store(state, action)
-                   
-    def save_models(self, path="./models", teamate_id=0):
-        """保存模型"""
-        # 确保网络已初始化
-        if not hasattr(self, 'networks_initialized') or not self.networks_initialized:
-            print("警告: 网络尚未初始化，无法保存模型")
-            return False
-            
+        return self.step(obs, deterministic=True)
+
+    def save_models(self, path="./models", agent_id=0):
+        import os
         os.makedirs(path, exist_ok=True)
-        
-        # 保存网络权重
-        torch.save(self.rl_eval_network.state_dict(), f"{path}/nfsp_agent_{teamate_id}_q_network.pth")
-        torch.save(self.sl_policy.state_dict(), f"{path}/nfsp_agent_{teamate_id}_policy_network.pth")
-        
-        # 保存模型元数据（保存状态大小信息，以便在不同观察模式下恢复）
+        self.rl_agent.save_models(path, agent_id)
+        torch.save(self.sl_policy.state_dict(), f"{path}/nfsp_agent_{agent_id}_policy_network.pth")
         metadata = {
             'state_size': self.state_size,
             'action_size': self.action_size,
             'hidden_units': self.hidden_units
         }
-        torch.save(metadata, f"{path}/nfsp_agent_{teamate_id}_metadata.pth")
-        
+        torch.save(metadata, f"{path}/nfsp_agent_{agent_id}_metadata.pth")
         return True
-    
-    def load_models(self, path="./models"):
+
+    def load_models(self, path, agent_id=0):
         """加载模型"""
+        ppo_success = False
+        sl_success = False
+        
         try:
-            player_id = self.player.level if hasattr(self.player, 'level') else "0"
+            # 加载PPO网络
+            ppo_path = os.path.join(path, f"nfsp_agent_{agent_id}_ppo_network.pth")
+            if os.path.exists(ppo_path):
+                try:
+                    # 加载模型，并指定设备
+                    checkpoint = torch.load(ppo_path, map_location=self.device)
+                    
+                    # 检查是否是字典格式并提取模型状态
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        self.rl_agent.actor.load_state_dict(checkpoint['model_state_dict'])
+                    else:
+                        self.rl_agent.actor.load_state_dict(checkpoint)
+                        
+                    ppo_success = True
+                    print(f"PPO网络加载成功: {ppo_path}")
+                except Exception as e:
+                    print(f"PPO网络加载失败: {e}")
+            else:
+                print(f"PPO网络文件不存在: {ppo_path}")
             
-            # 尝试加载元数据
-            metadata_path = f"{path}/nfsp_agent_{player_id}_metadata.pth"
-            if os.path.exists(metadata_path):
-                metadata = torch.load(metadata_path)
-                stored_state_size = metadata.get('state_size', self.state_size)
-                stored_action_size = metadata.get('action_size', self.action_size)
-                stored_hidden_units = metadata.get('hidden_units', self.hidden_units)
-                
-                print(f"加载模型元数据: state_size={stored_state_size}, action_size={stored_action_size}")
-                
-                # 临时更新参数以匹配保存的模型
-                self.state_size = stored_state_size
-                self.action_size = stored_action_size
-                self.hidden_units = stored_hidden_units
+            # 加载SL网络
+            sl_path = os.path.join(path, f"nfsp_agent_{agent_id}_policy_network.pth")
+            if os.path.exists(sl_path):
+                try:
+                    # 加载模型，并指定设备
+                    checkpoint = torch.load(sl_path, map_location=self.device)
+                    
+                    # 检查是否是字典格式并提取模型状态
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        self.sl_policy.load_state_dict(checkpoint['model_state_dict'])
+                    else:
+                        self.sl_policy.load_state_dict(checkpoint)
+                        
+                    sl_success = True
+                    print(f"SL网络加载成功: {sl_path}")
+                except Exception as e:
+                    print(f"SL网络加载失败: {e}")
+            else:
+                print(f"SL网络文件不存在: {sl_path}")
             
-            # 初始化网络结构
-            if not hasattr(self, 'networks_initialized') or not self.networks_initialized:
-                # 使用临时状态创建初始网络
-                dummy_state = np.zeros(self.state_size)
-                self._init_networks({'obs': dummy_state})
-                
-            # 加载模型权重
-            self.rl_eval_network.load_state_dict(torch.load(f"{path}/nfsp_agent_{player_id}_q_network.pth"))
-            self.rl_target_network.load_state_dict(self.rl_eval_network.state_dict())
-            self.sl_policy.load_state_dict(torch.load(f"{path}/nfsp_agent_{player_id}_policy_network.pth"))
-            print(f"成功加载模型 - Agent {player_id}")
+            # 只要有一个网络加载成功，就返回True
+            return ppo_success or sl_success
             
-            return True
-        except FileNotFoundError as e:
-            print(f"找不到模型文件: {e}")
-            return False
         except Exception as e:
-            print(f"加载模型时出错: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"模型加载过程中发生错误: {e}")
             return False
 
     def get_policy_accuracy_history(self):
-        """获取策略准确率历史记录"""
         return self.policy_accuracies
-        
-    def evaluate_team_exploitability(self, env, agents, num_episodes=100):
-        """
-        评估团队的可利用度
-        
-        这个方法将创建一个平均策略并计算团队的协作可利用度，
-        可以用于监控训练过程中团队协作能力的演变。
-        
-        参数:
-            env: 游戏环境
-            agents: NFSPAgent列表
-            num_episodes: 评估回合数
-            
-        返回:
-            团队可利用度和平均团队奖励
-        """
-        try:
-            # 简化实现，返回一个基本分数
-            # 这避免了在评估过程中复杂的计算和可能的错误
-            
-            # 运行一个短回合评估获取基本奖励
-            total_rewards = np.zeros(len(agents))
-            for _ in range(min(10, num_episodes)):
-                try:
-                    _, payoffs = env.run(agents, is_training=False)
-                    total_rewards += payoffs
-                except Exception as e:
-                    print(f"运行评估时出错: {e}")
-                    continue
-            
-            # 计算平均奖励
-            if sum(total_rewards) > 0:
-                avg_reward = np.mean(total_rewards) / min(10, num_episodes)
-            else:
-                avg_reward = 0.5  # 默认值
-            
-            # 计算一个基于奖励的可利用度估计
-            # 这里我们使用一个简单的启发式方法：高奖励对应低可利用度
-            exploitability = max(0.0, 1.0 - avg_reward/2.0)
-            
-            return exploitability, avg_reward
-            
-        except Exception as e:
-            print(f"评估可利用度时出错: {e}")
-            import traceback
-            traceback.print_exc()
-            # 返回默认值
-            return 0.5, 1.0
 
-
-class AveragePolicy:
-    def __init__(self, policy_network):
-        # 检查输入类型
-        if hasattr(policy_network, 'sl_policy'):
-            # 如果输入是NFSPAgent对象
-            self.policy = policy_network.sl_policy
-            if hasattr(policy_network, 'device'):
-                self.device = policy_network.device
-            else:
-                self.device = next(self.policy.parameters()).device
-        elif hasattr(policy_network, 'parameters'):
-            # 如果输入是PyTorch模型
-            self.policy = policy_network
-            self.device = next(policy_network.parameters()).device
+    def add_traj2buffer(self, traj):
+        """轨迹添加到PPO agent的缓冲区"""
+        if hasattr(self, 'rl_agent') and hasattr(self.rl_agent, 'add_traj2buffer'):
+            self.rl_agent.add_traj2buffer(traj)
         else:
-            # 处理其他情况（可能是PlayerObservation对象）
-            raise ValueError(f"Unsupported policy_network type: {type(policy_network)}")
-        
-        self.use_raw = False
-        
-    def calculate_cooperative_exploitability(self, env, agents, num_episodes=100):
-        """计算合作的可利用度（仅作为接口方法存在，避免调用错误）"""
-        print("警告：合作可利用度计算功能尚未实现")
-        # 简单地返回一个合理的默认值
-        return 0.5
-        
-    def evaluate_team_performance(self, env, agents, num_episodes=100):
-        """评估团队性能（仅作为接口方法存在，避免调用错误）"""
-        print("警告：团队性能评估功能尚未实现")
-        # 简单地返回一个合理的默认值
-        return 1.0
-      
-    def act(self, state, eps=0):
+            print(f"[WARNING] NFSP agent: rl_agent或add_traj2buffer方法不存在")
+
+    def debug_sl_buffer(self):
+        print(f"[DEBUG] SL buffer 当前容量: {len(self.sl_memory)} / {self.sl_memory.buffer_size}")
+        if len(self.sl_memory) > 0:
+            actions = [a for _, a in self.sl_memory.buffer]
+            print("[DEBUG] SL buffer 动作分布:", np.bincount(actions, minlength=self.action_size))
+        else:
+            print("[DEBUG] SL buffer 为空")
+
+    def debug_sl_policy_structure(self):
+        print("[DEBUG] SL policy 网络结构:")
+        print(self.sl_policy)
+        param_count = sum(p.numel() for p in self.sl_policy.parameters())
+        print(f"[DEBUG] SL policy参数量: {param_count}")
+
+    def debug_sl_train_steps(self, batch_size=64, repeat=10):
+        print(f"[DEBUG] SL policy 训练 {repeat} 个 batch，每个 batch 大小 {batch_size}")
+        for i in range(repeat):
+            self.sl_train(batch_size)
+
+    def debug_sl_lr(self):
+        print(f"[DEBUG] 当前SL policy学习率: {self.sl_optimizer.param_groups[0]['lr']}")
+
+    def debug_compare_policy_distributions(self, state_batch):
+        # state_batch: torch.FloatTensor [batch, state_dim]
         with torch.no_grad():
-            # 状态预处理
-            if not isinstance(state, torch.Tensor):
-                state = torch.FloatTensor(state).to(self.device)
-            
-            # 确保状态维度正确
-            if len(state.shape) == 1:
-                state = state.unsqueeze(0)
-                
-            # 获取策略输出
-            probs = self.policy.forward(state)
-            
-            # 返回动作概率
-            return probs.cpu().numpy()[0]
+            ppo_probs = self.rl_agent.actor(state_batch).cpu().numpy()
+            sl_probs = self.sl_policy(state_batch).cpu().numpy()
+            kl = np.sum(ppo_probs * (np.log(ppo_probs + 1e-8) - np.log(sl_probs + 1e-8)), axis=1)
+            print("[DEBUG] KL散度均值:", kl.mean())
+            print("[DEBUG] PPO分布样例:", ppo_probs[0])
+            print("[DEBUG] SL分布样例:", sl_probs[0])
+
+    def debug_plot_sl_loss(self):
+        if hasattr(self, 'losses') and len(self.losses) > 0:
+            plt.figure()
+            plt.plot(self.losses)
+            plt.title('SL policy loss curve')
+            plt.xlabel('SL train steps')
+            plt.ylabel('Loss')
+            plt.show()
+        else:
+            print("[DEBUG] SL policy loss 记录为空")
