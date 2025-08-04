@@ -2,14 +2,12 @@ from .agent import BaseAgent
 from .nfsp_agent import NFSPAgent
 from .partner_agent import *
 from .ppo_agent import PPOAgent
-from .teammate_prediction_net import TeammatePredictor, TeammatePredictor_Memory, TeammatePredictor_Trainer
+from .integrated_nfsp_agent import IntegratedNFSPAgent
 
 __all__ = [
     'BaseAgent',
     'NFSPAgent', 
+    'IntegratedNFSPAgent',
     'PPOAgent',
-    'SimpleAgent2',
-    'TeammatePredictor',
-    'TeammatePredictor_Memory', 
-    'TeammatePredictor_Trainer'
+    'SimpleAgent2'
 ] 

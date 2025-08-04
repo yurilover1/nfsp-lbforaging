@@ -613,32 +613,28 @@ class ForagingEnv(gym.Env):
         self.agent_positions_history.append(list(self.agent_positions))
         food_positions = [(i, j) for i, j, level in self.field.get_all_food_infos()]
         self.food_positions_history.append(food_positions)
-        # ====== 每步吸引力奖励计算与归一化 ======
+        
+        # ====== 使用Field类计算吸引力奖励 ======
         if not hasattr(self, 'step_attraction_rewards'):
             self.step_attraction_rewards = []
-        if self.current_step > 1 and len(self.agent_positions_history) >= 2 and len(self.food_positions_history) >= 2:
-            prev_agent_pos = self.agent_positions_history[-2][0]
-            curr_agent_pos = self.agent_positions_history[-1][0]
-            prev_foods = self.food_positions_history[-2]
-            curr_foods = self.food_positions_history[-1]
-            if len(prev_foods) > 0 and len(curr_foods) == len(prev_foods):
-                prev_min_dist = min(abs(prev_agent_pos[0] - f[0]) + abs(prev_agent_pos[1] - f[1]) for f in prev_foods)
-                curr_min_dist = min(abs(curr_agent_pos[0] - f[0]) + abs(curr_agent_pos[1] - f[1]) for f in curr_foods)
-                dist_change = prev_min_dist - curr_min_dist
-                norm_reward = 2 / (1 + np.exp(-dist_change)) - 1
-                norm_reward *= self.attraction_reward_factor
-                self.step_attraction_rewards.append(norm_reward)
-                # 记录到csv
-                import os
-                os.makedirs('logs', exist_ok=True)
-                with open('logs/attraction_step_reward.csv', 'a') as f:
-                    f.write(f"{getattr(self, 'current_episode', 0)},{self.current_step},{norm_reward},{curr_agent_pos},{curr_foods}\n")
-            else:
-                self.step_attraction_rewards.append(0.0)
-                norm_reward = 0.0
+        
+        # 获取主玩家（ego player）
+        ego_player = self.players[0] if len(self.players) > 0 else None
+        
+        # 使用Field类计算吸引力奖励
+        if ego_player and self.current_step > 1:
+            # 设置Field的吸引力奖励因子
+            self.field.set_attraction_reward_factor(self.attraction_reward_factor)
+            # 计算吸引力奖励（包含日志记录）
+            norm_reward = self.field.update_attraction_reward(
+                ego_player, 
+                self.current_step, 
+                getattr(self, 'current_episode', 0)
+            )
+            self.step_attraction_rewards.append(norm_reward)
         else:
-            self.step_attraction_rewards.append(0.0)
             norm_reward = 0.0
+        
         # ====== END ======
         
         # 检查游戏是否结束

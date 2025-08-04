@@ -1,0 +1,23 @@
+# 深度学习框架
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 数据处理和科学计算
+numpy>=1.21.0
+matplotlib>=3.5.0
+pandas>=1.4.0
+
+# 强化学习环境
+gymnasium>=0.28.0
+
+# 进度条和工具
+tqdm>=4.64.0
+
+# 图像处理（用于环境渲染）
+Pillow>=9.0.0
+
+# 其他依赖
+six>=1.16.0
+
+# 本地安装lbforaging环境
+-e ./lbforaging

@@ -328,7 +328,7 @@ class IntegratedNFSPAgent(BaseAgent):
         # 加载PPO网络
         ppo_path = os.path.join(path, f"integrated_nfsp_agent_{agent_id}_ppo_network.pth")
         if os.path.exists(ppo_path):
-            checkpoint = torch.load(ppo_path, map_location=self.device)
+            checkpoint = torch.load(ppo_path, map_location=self.device, weights_only=False)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 self.actor.load_state_dict(checkpoint['model_state_dict'])
             else:
@@ -338,7 +338,7 @@ class IntegratedNFSPAgent(BaseAgent):
         # 加载SL网络
         sl_path = os.path.join(path, f"integrated_nfsp_agent_{agent_id}_policy_network.pth")
         if os.path.exists(sl_path):
-            checkpoint = torch.load(sl_path, map_location=self.device)
+            checkpoint = torch.load(sl_path, map_location=self.device, weights_only=False)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 self.sl_policy.load_state_dict(checkpoint['model_state_dict'])
             else:

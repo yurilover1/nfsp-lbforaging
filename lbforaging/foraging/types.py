@@ -24,7 +24,7 @@ class Player:
         reward: 玩家奖励
         is_self: 是否为主玩家
         agent: 关联的智能体对象
-        position_history: 位置历史记录，用于吸引力奖励计算
+        prev_position: 前一步位置，用于吸引力奖励计算
     """
     player_id: int
     level: int = 1
@@ -33,12 +33,12 @@ class Player:
     reward: float = 0.0
     is_self: bool = False
     agent: Optional[object] = None
-    position_history: Optional[list] = None
+    prev_position: Optional[Tuple[int, int]] = None
     
     def __post_init__(self):
-        """初始化位置历史"""
-        if self.position_history is None:
-            self.position_history = []
+        """初始化前一步位置"""
+        if self.prev_position is None:
+            self.prev_position = self.position
     
     def select_action(self, observation, is_training=False):
         """
@@ -74,24 +74,21 @@ class Player:
         self.reward = 0.0
     
     def update_position(self, new_position):
-        """更新位置"""
+        """更新位置，同时保存前一步位置"""
+        self.prev_position = self.position
         self.position = new_position
     
     def get_position(self):
-        """获取位置"""
+        """获取当前位置"""
         return self.position
     
-    def record_position(self):
-        """记录当前位置到历史"""
-        self.position_history.append(list(self.position))
+    def get_prev_position(self):
+        """获取前一步位置"""
+        return self.prev_position
     
-    def get_position_history(self):
-        """获取位置历史"""
-        return self.position_history.copy()
-    
-    def clear_position_history(self):
-        """清空位置历史"""
-        self.position_history.clear()
+    def set_prev_position(self, prev_pos):
+        """设置前一步位置"""
+        self.prev_position = prev_pos
     
     def get_level(self):
         """获取等级"""
@@ -218,8 +215,7 @@ class Field:
         self.food_pickup_history = []  # [(step, food_pos, food_level), ...]
         
         # 吸引力奖励计算相关
-        self._prev_food_positions = set()  # 上一步的食物位置
-        self._attraction_reward_accumulator = 0.0  # 累积的吸引力奖励
+        self._prev_food_positions = set()  # 前一步的食物位置
         self._attraction_reward_factor = 0.1  # 吸引力奖励因子
     
     def _initialize_empty_field(self):
@@ -369,6 +365,9 @@ class Field:
         # 清除旧位置
         self.clear_position(old_row, old_col)
         
+        # 更新玩家位置（这会自动保存前一步位置）
+        player.update_position((new_row, new_col))
+        
         # 放置到新位置
         return self.place_player(player, new_row, new_col)
     
@@ -427,32 +426,36 @@ class Field:
         """清空食物拾取历史"""
         self.food_pickup_history.clear()
     
-    def update_attraction_reward(self, player: Player, step: int) -> float:
+    def update_attraction_reward(self, player: Player, step: int, episode: int = 0) -> float:
         """
         更新并计算当前步的吸引力奖励
         
         Args:
             player: 玩家对象
             step: 当前步数
+            episode: 当前回合数，用于日志记录
             
         Returns:
             float: 当前步的吸引力奖励
         """
-        if not player or len(player.position_history) < 2:
+        if not player or player.prev_position is None:
             return 0.0
         
         # 获取当前食物位置
         current_food_positions = set(self.food_positions.keys())
         
-        # 获取玩家当前位置和上一步位置
-        current_pos = player.position_history[-1]
-        prev_pos = player.position_history[-2]
+        # 获取玩家当前位置和前一步位置
+        current_pos = player.position
+        prev_pos = player.prev_position
         
         # 计算吸引力奖励
         step_reward = 0.0
         
-        # 如果有食物位置变化，计算距离变化
-        if self._prev_food_positions and current_food_positions:
+        # 检查食物数量是否保持不变（与原来环境逻辑一致）
+        if (self._prev_food_positions and current_food_positions and 
+            len(self._prev_food_positions) > 0 and 
+            len(current_food_positions) == len(self._prev_food_positions)):
+            
             # 计算到最近食物的距离变化
             current_min_dist = min(abs(current_pos[0] - f[0]) + abs(current_pos[1] - f[1]) 
                                  for f in current_food_positions)
@@ -467,26 +470,19 @@ class Field:
                 step_reward = 2 / (1 + np.exp(-distance_change)) - 1
                 step_reward *= self._attraction_reward_factor
         
-        # 更新上一步的食物位置
+        # 更新前一步的食物位置
         self._prev_food_positions = current_food_positions.copy()
         
-        # 累加到总奖励
-        self._attraction_reward_accumulator += step_reward
+        # 记录到csv日志
+        import os
+        os.makedirs('logs', exist_ok=True)
+        with open('logs/attraction_step_reward.csv', 'a') as f:
+            f.write(f"{episode},{step},{step_reward},{current_pos},{list(current_food_positions)}\n")
         
         return step_reward
     
-    def get_attraction_reward_total(self) -> float:
-        """
-        获取累积的吸引力奖励
-        
-        Returns:
-            float: 累积的吸引力奖励
-        """
-        return self._attraction_reward_accumulator
-    
-    def reset_attraction_reward(self):
-        """重置吸引力奖励"""
-        self._attraction_reward_accumulator = 0.0
+    def reset_attraction_state(self):
+        """重置吸引力奖励相关状态"""
         self._prev_food_positions.clear()
     
     def set_attraction_reward_factor(self, factor: float):

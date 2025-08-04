@@ -19,7 +19,7 @@ def main(args):
     from lbforaging.foraging.environment import ForagingEnv
     env = ForagingEnv(
         num_agents=2,
-        min_player_level=2,
+        min_player_level=1,
         max_player_level=2,
         min_food_level=1,
         max_food_level=2,
@@ -239,7 +239,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("integrated_debug.log"),
+            logging.FileHandler("logs/integrated_debug.log"),
             logging.StreamHandler()
         ]
     )
