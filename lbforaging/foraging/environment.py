@@ -1,13 +1,11 @@
 import time
 from collections import deque
 from enum import Enum
-
 import gymnasium as gym
 import numpy as np
 from gymnasium.utils import seeding
 
 from .types import Field, Player
-
 
 class Action(Enum):
     NONE = 0
@@ -75,10 +73,7 @@ class ForagingEnv(gym.Env):
         self.attraction_reward_factor = attraction_reward_factor
         self.decay_rate = decay_rate
         
-        # 位置历史记录
-        self.agent_positions_history = []
-        self.food_positions_history = []
-        self.step_attraction_rewards = []  # 每步吸引力奖励记录
+        self.step_attraction_rewards = []
 
         # 食物等级配置
         self.min_food_level = self._ensure_array(min_food_level, max_num_food)
@@ -374,7 +369,7 @@ class ForagingEnv(gym.Env):
         movement_actions = [Action.NORTH, Action.SOUTH, Action.WEST, Action.EAST]
         
         for agent_idx in range(self.num_agents):
-            valid_actions = [Action.NONE]  # NONE总是有效
+            valid_actions = []
             agent_pos = self.get_agent_position_from_field(agent_idx)
             
             # 检查移动动作
@@ -383,7 +378,10 @@ class ForagingEnv(gym.Env):
                     
             # 检查加载动作
             if self._can_load(agent_pos):
-                valid_actions.append(Action.LOAD)
+                valid_actions.extend([Action.NONE, Action.LOAD])
+            
+            if len(valid_actions) == 0:
+                valid_actions.append(Action.NONE)
                 
             self._valid_actions.append(valid_actions)
 
@@ -476,6 +474,8 @@ class ForagingEnv(gym.Env):
 
         # 重置玩家奖励
         self.reset_player_rewards()
+        self.step_attraction_rewards = []
+        self.step_food_rewards = []
 
         observations = self._make_observations()
         self.reward_events = []
@@ -488,6 +488,8 @@ class ForagingEnv(gym.Env):
             os.makedirs('logs', exist_ok=True)
             with open('logs/attraction_step_reward.csv', 'w') as f:
                 f.write('episode,step,attraction_reward,agent_pos,food_pos\n')
+            with open('logs/food_step_reward.csv', 'w') as f:
+                f.write('episode,step,food_reward\n')
         
         # 重置统计变量
         self.valid_action_count = 0
@@ -605,14 +607,26 @@ class ForagingEnv(gym.Env):
                 self._process_agent_movement(agent_idx, action)
         
         # 处理加载动作
+        food_reward = 0.0
         if loading_agents:
-            self._process_loading(loading_agents)
-        # ====== END ======
+            loaded_foods = self._process_loading(loading_agents)
+            # 计算食物奖励
+            for food_info in loaded_foods:
+                if food_info['success'] and food_info['agent'] == 0:  # 只关注ego agent
+                    food_reward += food_info['food_level'] * 0.2  # 食物等级越高，奖励越大
         
-        # 记录位置历史
-        self.agent_positions_history.append(list(self.agent_positions))
-        food_positions = [(i, j) for i, j, level in self.field.get_all_food_infos()]
-        self.food_positions_history.append(food_positions)
+        # 初始化或更新step_food_rewards
+        if not hasattr(self, 'step_food_rewards'):
+            self.step_food_rewards = []
+        self.step_food_rewards.append(food_reward)
+        
+        # 记录食物奖励到日志
+        if food_reward > 0:
+            import os
+            os.makedirs('logs', exist_ok=True)
+            with open('logs/food_step_reward.csv', 'a') as f:
+                f.write(f"{getattr(self, 'current_episode', 0)},{self.current_step},{food_reward}\n")
+        # ====== END ======
         
         # ====== 使用Field类计算吸引力奖励 ======
         if not hasattr(self, 'step_attraction_rewards'):
@@ -622,7 +636,7 @@ class ForagingEnv(gym.Env):
         ego_player = self.players[0] if len(self.players) > 0 else None
         
         # 使用Field类计算吸引力奖励
-        if ego_player and self.current_step > 1:
+        if ego_player:
             # 设置Field的吸引力奖励因子
             self.field.set_attraction_reward_factor(self.attraction_reward_factor)
             # 计算吸引力奖励（包含日志记录）
@@ -652,10 +666,11 @@ class ForagingEnv(gym.Env):
             self.distribute_rewards(final_reward)
         else:
             final_reward = 0.0
-            self._last_reward_detail = {'total': 0.0, 'base': 0.0, 'attraction': 0.0, 'step': 0.0}
+            self._last_reward_detail = {'total': 0.0, 'base': 0.0, 'food': 0.0, 'step': 0.0}
         
-        # 修改：每步reward都包含吸引力奖励，终局时再加终局奖励
-        reward = norm_reward
+        # 修改：每步reward包含吸引力奖励和食物奖励，终局时再加终局奖励
+        food_reward = self.step_food_rewards[-1] if hasattr(self, 'step_food_rewards') and self.step_food_rewards else 0.0
+        reward = norm_reward + food_reward
         if self._game_over:
             reward += final_reward
         
@@ -721,7 +736,7 @@ class ForagingEnv(gym.Env):
             
             # 记录终局奖励和详细组成
             if done:
-                final_reward = reward
+                final_reward = self._last_reward_detail['total']
                 final_reward_detail = self._last_reward_detail.copy() if hasattr(self, '_last_reward_detail') else None
             
             # 更新观察
@@ -734,13 +749,24 @@ class ForagingEnv(gym.Env):
         # 添加轨迹到经验缓冲区
         if is_training and ego_player and ego_player.agent and hasattr(ego_player.agent, 'add_traj2buffer'):
             step_attraction_rewards = self.step_attraction_rewards if hasattr(self, 'step_attraction_rewards') else []
+            food_rewards = self.step_food_rewards if hasattr(self, 'step_food_rewards') else [0.0] * len(trajectories)
+            
             for idx, ts in enumerate(trajectories):
-                # 每步奖励只包含该步吸引力奖励，只有最后一步加终局奖励
+                # 每步奖励包含：吸引力奖励 + 食物奖励，最后一步额外加终局奖励
                 step_reward = 0.0
+                
+                # 添加吸引力奖励
                 if idx < len(step_attraction_rewards):
                     step_reward += step_attraction_rewards[idx]
+                
+                # 添加食物奖励
+                if idx < len(food_rewards):
+                    step_reward += food_rewards[idx]
+                
+                # 最后一步额外添加终局奖励
                 if idx == len(trajectories) - 1:
                     step_reward += final_reward
+                
                 ego_player.agent.add_traj2buffer([
                     ts[0],
                     ts[1],
@@ -748,7 +774,6 @@ class ForagingEnv(gym.Env):
                     ts[2],
                     ts[3]
                 ])
-            self.step_attraction_rewards = []  # 清空
         
         return trajectories, final_reward, self.current_step, final_reward_detail
 
@@ -840,28 +865,38 @@ class ForagingEnv(gym.Env):
         reward = 0.0
         base_reward = 0.0
         step_reward = 0.0
+        food_reward = 0.0
 
-        # 基础奖励
+        # 计算已收集的食物总量
         food_sum = self.field.get_total_food_level()
-        if food_sum == 0:
+        collected_food_level = self._food_spawned - food_sum if self._food_spawned > 0 else 0
+        
+        # 基础奖励 - 基于任务完成度
+        if food_sum == 0:  # 全部食物都被收集
             base_reward = 1.0
         else:
-            success_rate = (self._food_spawned - food_sum) / self._food_spawned if self._food_spawned > 0 else 0
-            base_reward = success_rate * 0.5 if success_rate > 0 else -1.0
+            success_rate = collected_food_level / self._food_spawned if self._food_spawned > 0 else 0
+            # 只有收集了食物才有正奖励，否则为负奖励
+            base_reward = success_rate * 0.5 if success_rate > 0 else -1
             # 限制基础奖励的最大值为1.0
             base_reward = min(base_reward, 1.0)
-        reward += base_reward
-
-        # 步数奖励
-        if reward > 0:
+        
+        # 步数效率奖励 - 鼓励更快完成任务
+        if base_reward > 0:
             step_efficiency = np.exp(-self.decay_rate * self.current_step)
-            step_reward = reward * self.step_reward_factor * step_efficiency
-            reward += step_reward
+            step_reward = base_reward * self.step_reward_factor * step_efficiency
+        
+        # 汇总各种奖励
+        reward = base_reward + step_reward
+        
+        # 统计过程中获得的食物奖励总和
+        if hasattr(self, 'step_food_rewards') and self.step_food_rewards:
+            food_reward = sum(self.step_food_rewards)
 
         return {
             'total': reward,
             'base': base_reward,
-            'attraction': 0.0,  # 保留字段但设为0，保持兼容性
+            'food': food_reward,  # 新增食物奖励字段
             'step': step_reward
         }
 

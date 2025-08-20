@@ -104,7 +104,11 @@ class Viewer(object):
             
         self.ax.set_title('Level Based Foraging')
         self.fig.canvas.draw()
-        plt.pause(0.01)  # 短暂暂停以更新显示，不阻塞程序执行
+        try:
+            plt.pause(0.01)  # 短暂暂停以更新显示，不阻塞程序执行
+        except KeyboardInterrupt:
+            # 渲染过程中的键盘中断，直接传递给上层处理
+            raise
         if return_rgb_array:
             canvas = self.fig.canvas
             width, height = self.fig.get_size_inches() * self.fig.get_dpi()

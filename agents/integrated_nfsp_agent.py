@@ -135,11 +135,11 @@ class IntegratedNFSPAgent(BaseAgent):
     def select_action(self, obs, is_training=False):
         if random.random() < self.eta:
             self.policy_mode = 'best'
-            action = self.step(obs, deterministic=False)
+            action = self.step(obs, deterministic=not is_training)
             self.sl_memory.add((self._preprocess_state(obs), action))
         else:
             self.policy_mode = 'average'
-            action = self.step(obs, deterministic=False)
+            action = self.step(obs, deterministic=not is_training)
         return action
 
     def add_traj2buffer(self, traj):

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple
-
+import os
 import numpy as np
 
 
@@ -306,6 +306,35 @@ class Field:
         
         return True
     
+    def _place_player_without_position_update(self, player: Player, row: int, col: int) -> bool:
+        """
+        在指定位置放置玩家，但不更新Player对象的position（用于move_player）
+        
+        Args:
+            player: 玩家对象
+            row, col: 位置坐标
+            
+        Returns:
+            bool: 是否成功放置
+        """
+        if not self._is_valid_position(row, col):
+            return False
+        
+        if not self.is_empty(row, col):
+            return False
+        
+        # 放置玩家到field，但不更新Player对象的position（因为在move_player中已经更新过了）
+        self.field_points[row, col] = FieldPoint(
+            type=FieldType.AGENT,
+            level=player.level,
+            player=player,
+            position=(row, col)
+        )
+        self.player_ids[row, col] = player.player_id
+        self.player_positions[player.player_id] = (row, col)
+        
+        return True
+    
     def place_food(self, row: int, col: int, level: int = 1) -> bool:
         """
         在指定位置放置食物
@@ -368,8 +397,8 @@ class Field:
         # 更新玩家位置（这会自动保存前一步位置）
         player.update_position((new_row, new_col))
         
-        # 放置到新位置
-        return self.place_player(player, new_row, new_col)
+        # 放置到新位置（不要重复更新position）
+        return self._place_player_without_position_update(player, new_row, new_col)
     
     def clear_position(self, row: int, col: int):
         """清空指定位置"""
@@ -469,15 +498,14 @@ class Field:
             if distance_change != 0:
                 step_reward = 2 / (1 + np.exp(-distance_change)) - 1
                 step_reward *= self._attraction_reward_factor
+            os.makedirs('logs', exist_ok=True)
+            with open('logs/attraction_step_reward.csv', 'a') as f:
+                f.write(f"{episode},{step},{step_reward},{current_pos},{list(current_food_positions)},{distance_change}\n")
         
         # 更新前一步的食物位置
         self._prev_food_positions = current_food_positions.copy()
         
         # 记录到csv日志
-        import os
-        os.makedirs('logs', exist_ok=True)
-        with open('logs/attraction_step_reward.csv', 'a') as f:
-            f.write(f"{episode},{step},{step_reward},{current_pos},{list(current_food_positions)}\n")
         
         return step_reward
     
